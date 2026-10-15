@@ -1,23 +1,16 @@
 """The mock token goes in the Authorization header and nowhere else (CONTRACTS §2.6)."""
 
-import asyncio
 import json
 import logging
-import socket
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from typing import Any
 
+import httpcore
 import httpx
 import pytest
 import respx
-import uvicorn
 from mcp.shared.memory import create_connected_server_and_client_session
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Tracer
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from starlette.routing import Route
 from tests.unit.mcp_server.conftest import TOKEN, FakeClock, SessionFactory, make_settings
 
 from helpdesk.mcp_server.mock_client import MockApiClient, create_mock_http_client
@@ -39,7 +32,7 @@ TICKET = {
     "updated_at": "2026-10-01T09:00:00Z",
     "comments": [],
 }
-DEBUG_LOGGERS = ("", "httpx", "httpcore", "mcp", "helpdesk", "uvicorn")
+DEBUG_LOGGERS = ("", "httpx", "httpcore", "mcp", "helpdesk")
 
 
 @pytest.fixture
@@ -95,43 +88,58 @@ async def test_token_echoed_by_upstream_is_redacted(
     assert TOKEN not in all_span_values(span_exporter)
 
 
-@asynccontextmanager
-async def loopback_mock(seen_auth: list[str]) -> AsyncIterator[str]:
-    """A stand-in mock on an ephemeral loopback port, so the real httpcore transport (and
-    its DEBUG logging) is exercised. It is in-process and never leaves 127.0.0.1."""
+class RecordingStream(httpcore.AsyncMockStream):
+    """httpcore's in-memory stream that also keeps the bytes the client wrote."""
 
-    async def get_ticket(request: Request) -> JSONResponse:
-        seen_auth.append(request.headers.get("authorization", ""))
-        return JSONResponse(TICKET)
+    def __init__(self, buffer: list[bytes], written: list[bytes]) -> None:
+        super().__init__(buffer)
+        self._written = written
 
-    app = Starlette(routes=[Route("/tickets/{ticket_id}", get_ticket)])
-    server = uvicorn.Server(uvicorn.Config(app, log_level="debug", lifespan="off"))
-    # Bound and listening before uvicorn starts, so the port is known up front and an
-    # early connection simply waits in the backlog.
-    with socket.create_server(("127.0.0.1", 0)) as sock:
-        port = sock.getsockname()[1]
-        task = asyncio.create_task(server.serve(sockets=[sock]))
-        try:
-            yield f"http://127.0.0.1:{port}"
-        finally:
-            server.should_exit = True
-            await task
+    # The signature is httpcore's network-stream interface.
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        self._written.append(buffer)
+
+
+class RecordingBackend(httpcore.AsyncMockBackend):
+    """No socket: every connection reads the scripted response from memory."""
+
+    def __init__(self, response: bytes) -> None:
+        super().__init__([response])
+        self._response = response
+        self.written: list[bytes] = []
+
+    async def connect_tcp(self, *args: Any, **kwargs: Any) -> httpcore.AsyncNetworkStream:
+        return RecordingStream([self._response], self.written)
+
+
+def in_memory_httpcore_transport(backend: RecordingBackend) -> httpx.AsyncHTTPTransport:
+    """httpx's real transport and httpcore's real HTTP/1.1 connection code (and its DEBUG
+    logging), over an in-memory network backend instead of a socket. httpx has no public
+    hook for the backend, so the pool is swapped in directly."""
+    transport = httpx.AsyncHTTPTransport()
+    transport._pool = httpcore.AsyncConnectionPool(network_backend=backend)
+    return transport
 
 
 async def test_token_absent_from_httpcore_debug_logs(
     debug_logs: pytest.LogCaptureFixture, tracer: Tracer, clock: FakeClock
 ) -> None:
-    seen_auth: list[str] = []
-    async with loopback_mock(seen_auth) as url:
-        settings = make_settings(mock_url=url)
-        async with create_mock_http_client(settings, TOKEN) as http:
-            client = MockApiClient(http, RetryPolicy.from_settings(settings), sleep=clock.sleep)
-            server = build_server(settings, client, redactor=SecretRedactor([TOKEN]), tracer=tracer)
-            async with create_connected_server_and_client_session(server) as session:
-                result = await session.call_tool("get_ticket", {"ticket_id": "INC-0003"})
+    body = json.dumps(TICKET).encode()
+    backend = RecordingBackend(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    settings = make_settings()
+    transport = in_memory_httpcore_transport(backend)
+    async with create_mock_http_client(settings, TOKEN, transport=transport) as http:
+        client = MockApiClient(http, RetryPolicy.from_settings(settings), sleep=clock.sleep)
+        server = build_server(settings, client, redactor=SecretRedactor([TOKEN]), tracer=tracer)
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool("get_ticket", {"ticket_id": "INC-0003"})
 
     assert result.isError is False
-    assert seen_auth == [f"Bearer {TOKEN}"]
+    assert f"Authorization: Bearer {TOKEN}".encode() in b"".join(backend.written)
     assert any(r.name.startswith("httpcore") for r in debug_logs.records)
     assert TOKEN not in debug_logs.text
 
