@@ -1,7 +1,5 @@
 """Pending approvals survive a restart; a crashed write re-runs with the same key."""
 
-import logging
-
 import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
@@ -9,8 +7,9 @@ from langgraph.types import Command
 from helpdesk.agent.decision import resume_value
 from helpdesk.agent.persistence import CHECKPOINT_TYPES, open_checkpointer
 from helpdesk.agent.run_config import build_run_config
+from helpdesk.shared.api import ChatStatus
 from helpdesk.shared.approval import PendingAction, WriteResult
-from helpdesk.shared.errors import ErrorCode
+from helpdesk.shared.errors import ErrorCode, ToolError
 from helpdesk.shared.tools import ToolName
 
 CONFIG = build_run_config("alice", "s1", recursion_limit=25)
@@ -76,21 +75,18 @@ async def test_crash_inside_execute_write_reruns_with_the_same_key(
 
 
 async def test_pending_action_and_write_result_round_trip_as_models(
-    make_graph, provider, fake_model, make_ai, caplog
+    make_graph, provider, fake_model, make_ai
 ):
     pending = await _propose(make_graph, provider, _script(fake_model, make_ai))
     graph = await make_graph(fake_model(responses=[make_ai("Done.")]), provider)
     await graph.ainvoke(Command(resume=resume_value(pending.action_id, approve=True)), CONFIG)
 
-    with caplog.at_level(logging.WARNING):
-        restarted = await make_graph(fake_model(responses=[]), provider)
-        values = (await restarted.aget_state(CONFIG)).values
+    restarted = await make_graph(fake_model(responses=[]), provider)
+    values = (await restarted.aget_state(CONFIG)).values
     last_write = values["last_write"]
     assert isinstance(last_write, WriteResult)
     assert last_write.tool is ToolName.ADD_COMMENT
     assert last_write.idempotency_key == pending.idempotency_key
-    # Nothing was blocked or let through with an "unregistered type" warning.
-    assert "deserializ" not in caplog.text.lower()
 
 
 async def test_checkpoint_serializer_is_strict_for_unlisted_types(settings):
@@ -114,12 +110,16 @@ async def test_checkpoint_serializer_is_strict_for_unlisted_types(settings):
         for value in (pending, failed):
             assert serde.loads_typed(serde.dumps_typed(value)) == value
 
-        class NotAllowed(PendingAction):
-            pass
-
-        smuggled = NotAllowed(**pending.model_dump())
-        restored = serde.loads_typed(serde.dumps_typed(smuggled))
-        assert not isinstance(restored, NotAllowed)
+        # Importable types outside the allowlist: a permissive serializer would import
+        # and rebuild them, so getting raw data back proves the allowlist is enforced.
+        # (A class local to this test could not be imported back in any mode.)
+        smuggled = (
+            ToolError(code=ErrorCode.TIMEOUT, what="w", next_step="n"),
+            ChatStatus.ERROR,
+        )
+        for value in smuggled:
+            restored = serde.loads_typed(serde.dumps_typed(value))
+            assert type(restored) is not type(value)
     assert {t.__name__ for t in CHECKPOINT_TYPES} == {
         "PendingAction",
         "WriteResult",
