@@ -1,0 +1,77 @@
+"""User-facing replies for turns that end in an error (CONTRACTS §3.4).
+
+The reply never contains exception text or a stack trace; the details go to the
+error span and the log.
+"""
+
+import anthropic
+from langchain_core.exceptions import (
+    ContextOverflowError,
+    ModelAPIError,
+    ModelAuthenticationError,
+    ModelConnectionError,
+    ModelError,
+    ModelPermissionDeniedError,
+    ModelRateLimitError,
+    ModelTimeoutError,
+)
+from langgraph.errors import GraphRecursionError
+
+DEADLINE_REPLY = (
+    "Sorry, this request took too long and was stopped. Nothing was changed by the "
+    "unfinished step. Please try again."
+)
+RECURSION_REPLY = (
+    "Sorry, I could not finish this request within my step limit. Please try again, "
+    "perhaps with a more specific question."
+)
+RATE_LIMIT_REPLY = (
+    "The AI model is receiving too many requests right now. Please try again in a minute."
+)
+OVERLOADED_REPLY = (
+    "The AI model service is overloaded or unavailable at the moment. Please try again shortly."
+)
+AUTH_REPLY = (
+    "The AI model service rejected the helpdesk's credentials. Please contact an administrator."
+)
+MODEL_TIMEOUT_REPLY = "The AI model service did not respond in time. Please try again."
+CONTEXT_REPLY = "This conversation has grown too long for the model. Please start a new session."
+MODEL_ERROR_REPLY = "The AI model service returned an error. Please try again."
+
+# Most specific first: the langchain-anthropic classes subclass both hierarchies,
+# and APITimeoutError subclasses APIConnectionError.
+_MODEL_ERROR_REPLIES: tuple[tuple[tuple[type[BaseException], ...], str], ...] = (
+    ((ContextOverflowError,), CONTEXT_REPLY),
+    ((ModelRateLimitError, anthropic.RateLimitError), RATE_LIMIT_REPLY),
+    (
+        (
+            ModelAuthenticationError,
+            ModelPermissionDeniedError,
+            anthropic.AuthenticationError,
+            anthropic.PermissionDeniedError,
+        ),
+        AUTH_REPLY,
+    ),
+    ((ModelTimeoutError, anthropic.APITimeoutError), MODEL_TIMEOUT_REPLY),
+    ((ModelConnectionError, anthropic.APIConnectionError), OVERLOADED_REPLY),
+    (
+        (ModelAPIError, anthropic.OverloadedError, anthropic.InternalServerError),
+        OVERLOADED_REPLY,
+    ),
+    ((ModelError, anthropic.APIError), MODEL_ERROR_REPLY),
+)
+
+
+def model_error_reply(error: BaseException) -> str | None:
+    """The reply for a model API error, or None if `error` is not one."""
+    for types, reply in _MODEL_ERROR_REPLIES:
+        if isinstance(error, types):
+            return reply
+    return None
+
+
+def turn_error_reply(error: BaseException) -> str | None:
+    """The reply for a known turn failure, or None for a bug (which should surface as 500)."""
+    if isinstance(error, GraphRecursionError):
+        return RECURSION_REPLY
+    return model_error_reply(error)
