@@ -1,4 +1,5 @@
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -6,11 +7,16 @@ import httpx
 import pytest
 import respx
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from openinference.instrumentation.langchain import LangChainInstrumentor
 from opentelemetry import trace
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 from helpdesk.shared import trace_attributes as ta
 from helpdesk.shared.settings import Settings
@@ -193,3 +199,53 @@ async def test_instrumented_app_and_httpx_client_produce_linked_spans(
     assert outbound["parent_span_id"] == server["span_id"]
     assert not [r for r in records if "/health" in r["name"]]
     assert all(r["service"] == "agent" for r in records)
+
+
+async def test_streamed_response_is_one_server_span(make_settings: Any) -> None:
+    settings: Settings = make_settings()
+    telemetry = setup_telemetry("agent", settings)
+    app = FastAPI()
+
+    @app.get("/stream")
+    async def stream() -> StreamingResponse:
+        async def events() -> AsyncIterator[str]:
+            for n in range(20):
+                yield f"data: {n}\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    instrument_app(app)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://agent.test"
+    ) as client:
+        assert (await client.get("/stream")).text.count("data:") == 20
+    assert telemetry.flush()
+
+    # Without exclude_spans every SSE event would add an "http send" span.
+    assert [r["name"] for r in _records(settings.traces_dir / "agent.jsonl")] == ["GET /stream"]
+
+
+async def test_plain_starlette_app_joins_the_callers_trace(make_settings: Any) -> None:
+    # The MCP server serves FastMCP's Starlette app, not a FastAPI one.
+    settings: Settings = make_settings()
+    telemetry = setup_telemetry("mcp", settings)
+
+    async def tool(request: Request) -> PlainTextResponse:
+        return PlainTextResponse("ok")
+
+    app = Starlette(routes=[Route("/mcp", tool, methods=["POST"])])
+    instrument_app(app)
+    caller_trace, caller_span = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://mcp.test"
+    ) as client:
+        response = await client.post(
+            "/mcp", headers={"traceparent": f"00-{caller_trace}-{caller_span}-01"}
+        )
+    assert response.text == "ok"
+    assert telemetry.flush()
+
+    (server,) = _records(settings.traces_dir / "mcp.jsonl")
+    assert server["name"] == "POST /mcp"
+    assert server["trace_id"] == caller_trace
+    assert server["parent_span_id"] == caller_span

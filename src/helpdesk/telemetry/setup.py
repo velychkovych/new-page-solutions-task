@@ -1,13 +1,13 @@
 """Process-wide tracing setup: one tracer provider per service process (CONTRACTS §6).
 
 Call `setup_telemetry(service_name)` once at startup, then `instrument_app(app)` for the
-service's FastAPI app, and `shutdown_telemetry()` on exit to flush the last batch.
+service's ASGI app, and `shutdown_telemetry()` on exit to flush the last batch.
 """
 
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from fastapi import FastAPI
 from openinference.instrumentation.langchain import LangChainInstrumentor
@@ -18,6 +18,7 @@ from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from starlette.applications import Starlette
 
 from helpdesk.shared.settings import Settings, get_settings
 from helpdesk.telemetry.jsonl_exporter import JsonlSpanExporter
@@ -30,6 +31,9 @@ _OTLP_TRACES_PATH = "/v1/traces"
 _JSONL_SCHEDULE_DELAY_MS = 200
 # Compose health checks hit /health every 5 s; tracing them would bury the real requests.
 _EXCLUDED_URLS = "/health$"
+# The ASGI middleware adds a span per `receive` and per `send` message, which for an SSE
+# stream is one per event. The server span already covers the whole request.
+_EXCLUDED_ASGI_SPANS: list[Literal["receive", "send"]] = ["receive", "send"]
 
 
 class TelemetryConfigError(RuntimeError):
@@ -61,7 +65,7 @@ class _State:
     active: Telemetry | None = None
     # Instrumentors are process singletons; remember which ones we switched on.
     instrumented: list[_Instrumentor] = field(default_factory=list)
-    apps: list[FastAPI] = field(default_factory=list)
+    apps: list[Starlette] = field(default_factory=list)
 
 
 _state = _State()
@@ -130,15 +134,24 @@ def setup_telemetry(service_name: str, settings: Settings | None = None) -> Tele
         return telemetry
 
 
-def instrument_app(app: FastAPI) -> None:
-    """Add server spans to a FastAPI app. Call after `setup_telemetry`, before serving."""
+def instrument_app(app: Starlette) -> None:
+    """Add server spans and `traceparent` extraction to an ASGI app.
+
+    Takes any Starlette app, so FastMCP's `streamable_http_app()` works as well as FastAPI.
+    Call after `setup_telemetry`, before serving.
+    """
     with _state.lock:
         if _state.active is None:
             raise TelemetryConfigError("call setup_telemetry() before instrument_app()")
         if any(app is known for known in _state.apps):
             return
+        # The instrumentor is typed for FastAPI, but it only uses Starlette's API
+        # (build_middleware_stack, routes), so a plain Starlette app works the same.
         FastAPIInstrumentor.instrument_app(
-            app, tracer_provider=_state.active.provider, excluded_urls=_EXCLUDED_URLS
+            cast(FastAPI, app),
+            tracer_provider=_state.active.provider,
+            excluded_urls=_EXCLUDED_URLS,
+            exclude_spans=_EXCLUDED_ASGI_SPANS,
         )
         _state.apps.append(app)
 
@@ -150,7 +163,7 @@ def shutdown_telemetry() -> None:
         if telemetry is None:
             return
         for app in _state.apps:
-            FastAPIInstrumentor.uninstrument_app(app)
+            FastAPIInstrumentor.uninstrument_app(cast(FastAPI, app))
         for instrumentor in _state.instrumented:
             instrumentor.uninstrument()
         _state.apps.clear()
