@@ -1,0 +1,19 @@
+event: tool_start
+data: {"call_id":"toolu_01SearchPrinter","name":"search_tickets","args":{"query":"printer offline","status":["open"],"cursor":null,"page_size":5}}
+
+event: status
+data: {"message":"Retrying search_tickets (attempt 2 of 3)"}
+
+event: status
+data: {"message":"Retrying search_tickets (attempt 3 of 3)"}
+
+event: tool_end
+data: {"call_id":"toolu_01SearchPrinter","result_summary":"ERROR UPSTREAM_UNAVAILABLE: The ticketing system returned 503 on all 3 attempts. Next step: Tell the user the ticketing system is unavailable and to try again later.","error":"ERROR UPSTREAM_UNAVAILABLE: The ticketing system returned 503 on all 3 attempts. Next step: Tell the user the ticketing system is unavailable and to try again later.","latency_ms":4120}
+
+event: error
+data: {"message":"The AI model is overloaded right now, so I could not finish. Nothing was changed. Please try again in a minute."}
+
+event: done
+data: {"trace_id":"929d0e0e47364bf92f3577b34da6a3ce","status":"error"}
+
+: end of fixture

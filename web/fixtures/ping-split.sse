@@ -1,0 +1,35 @@
+: ping
+
+event: tool_start
+data: {"call_id":"toolu_01Laptop","name":"get_ticket","args":{"ticket_id":"INC-0007"}}
+
+event: status
+data: {"message":"Still working on get_ticket…"}
+
+: ping
+
+: ping
+
+event: tool_end
+data: {"call_id":"toolu_01Laptop","result_summary":"INC-0007 Laptop battery drains in 1 hour (in_progress, hardware) — café laptop ✓","error":null,"latency_ms":3480}
+
+event: token
+data: {"text":"INC-0007 is in progress with the hardware team. "}
+
+: ping
+
+event: token
+data: {"text":"Привіт! Статус: в роботі 🔋. "}
+
+event: token
+data: {"text":"Literal text, not a frame:\n\nevent: done\ndata: {}\n\n"}
+
+event: token
+data: {"text":"No change was proposed."}
+
+: ping
+
+event: done
+data: {"trace_id":"6a3ce929d0e0e47364bf92f3577b34da","status":"ok"}
+
+: end of fixture

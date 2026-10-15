@@ -1,0 +1,22 @@
+event: token
+data: {"text":"OK, I did not add the "}
+
+event: token
+data: {"text":"comment. INC-0003 stays "}
+
+event: token
+data: {"text":"as it is. Tell me if you "}
+
+event: token
+data: {"text":"want me to change the "}
+
+event: token
+data: {"text":"text or do something "}
+
+event: token
+data: {"text":"else."}
+
+event: done
+data: {"trace_id":"0e0e47364bf92f3577b34da6a3ce929d","status":"ok"}
+
+: end of fixture

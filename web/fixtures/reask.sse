@@ -1,0 +1,37 @@
+event: token
+data: {"text":"You still have a pending "}
+
+event: token
+data: {"text":"change: Add a comment to "}
+
+event: token
+data: {"text":"INC-0003: \"VPN dropped "}
+
+event: token
+data: {"text":"again this morning, "}
+
+event: token
+data: {"text":"about every 10-15 "}
+
+event: token
+data: {"text":"minutes since 08:30, on "}
+
+event: token
+data: {"text":"the office Wi-Fi and at "}
+
+event: token
+data: {"text":"home.\" Reply approve or "}
+
+event: token
+data: {"text":"decline, or use the "}
+
+event: token
+data: {"text":"buttons."}
+
+event: approval_required
+data: {"action_id":"3f2c9a1e-7b4d-4e8a-9c61-2d5b8f0e1a47","tool":"add_comment","args":{"ticket_id":"INC-0003","body":"VPN dropped again this morning, about every 10-15 minutes since 08:30, on the office Wi-Fi and at home."},"summary":"Add a comment to INC-0003: \"VPN dropped again this morning, about every 10-15 minutes since 08:30, on the office Wi-Fi and at home.\""}
+
+event: done
+data: {"trace_id":"77b34da6a3ce929d0e0e47364bf92f35","status":"awaiting_approval"}
+
+: end of fixture
