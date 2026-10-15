@@ -132,6 +132,27 @@ def test_merges_services_and_shows_orphans(make_settings: Any) -> None:
     assert "skipped 1 unreadable line" in err
 
 
+def test_line_cut_inside_a_multibyte_character_is_skipped(make_settings: Any) -> None:
+    settings: Settings = make_settings()
+    path = settings.traces_dir / "agent.jsonl"
+    root, later = "1" * 16, "2" * 16
+    _write(path, _span(root, None, ta.SPAN_REQUEST, "agent", attributes={"text": "café"}))
+    # A service died mid-write inside "é" (two UTF-8 bytes); after its restart the next
+    # record is appended right behind the broken bytes, so they end up mid-file.
+    cut = _span("3" * 16, root, "lost", "agent").model_dump_json().replace("lost", "é")
+    with path.open("ab") as file:
+        file.write(cut.encode("utf-8")[: cut.encode("utf-8").index("é".encode()) + 1])
+    _write(path, _span(later, root, "after-restart", "agent", offset_ms=5))
+    _write(path, _span("4" * 16, None, "another", "agent", offset_ms=9))
+
+    code, out, err = _run(settings, TRACE)
+
+    assert code == ExitCode.OK
+    assert out.splitlines()[0] == f"trace {TRACE}: 2 spans, services: agent"
+    assert "another" in out
+    assert "skipped 1 unreadable line" in err
+
+
 def test_renders_tokens_tool_details_and_retry_events(make_settings: Any) -> None:
     settings: Settings = make_settings()
     root, llm, tool = "1" * 16, "2" * 16, "3" * 16

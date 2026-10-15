@@ -55,15 +55,18 @@ def load_trace(traces_dir: Path, trace_id: str) -> LoadedTrace:
     spans: dict[str, SpanRecord] = {}
     files = sorted(traces_dir.glob("*.jsonl")) if traces_dir.is_dir() else []
     skipped = 0
+    needle = trace_id.encode("ascii")
     for path in files:
-        with path.open(encoding="utf-8") as file:
+        # Binary, so a write cut inside a multi-byte character spoils only its own line
+        # instead of raising for the whole file.
+        with path.open("rb") as file:
             for line in file:
                 # Cheap pre-filter: trace files grow large and most lines are other traces.
-                if trace_id not in line:
+                if needle not in line:
                     continue
                 try:
-                    record = SpanRecord.model_validate_json(line)
-                except ValidationError:
+                    record = SpanRecord.model_validate_json(line.decode("utf-8"))
+                except UnicodeDecodeError, ValidationError:
                     # A line a service is still writing, or a corrupt one: skip, but say so.
                     skipped += 1
                     continue
