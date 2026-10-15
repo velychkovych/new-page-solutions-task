@@ -132,6 +132,37 @@ async def test_non_json_body_is_422(mock) -> None:
     assert response.json()["error"] == "invalid_request"
 
 
+@pytest.mark.parametrize("body", [b'{"title":"\xff"}', b"\xff\xfe\x00"])
+async def test_non_utf8_body_is_422(mock, body: bytes) -> None:
+    # FastAPI turns a body it cannot decode into HTTPException(400); §1.7 keeps 400 for
+    # idempotency keys and cursors only, so it must be the same 422 as unparseable JSON.
+    response = await mock.client.post(
+        "/tickets",
+        content=body,
+        headers={**mock.AUTH, "Idempotency-Key": "k-utf8", "Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_request"
+    assert await mock.writes() == {"total": 0, "by_key": {}}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/tickets/"), ("POST", "/tickets/"), ("POST", "/tickets/INC-0003/comments/")],
+)
+async def test_trailing_slash_is_404_not_redirect(mock, method: str, path: str) -> None:
+    # A 307 has no ApiError body, and a client following it would re-send a write.
+    response = await mock.client.request(
+        method,
+        path,
+        json=mock.NEW_TICKET,
+        headers={**mock.AUTH, "Idempotency-Key": "k-slash"},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_found"}
+    assert "location" not in response.headers
+
+
 async def test_validation_detail_does_not_echo_input(mock) -> None:
     body = {**mock.NEW_TICKET, "reporter_id": "secret value with spaces"}
     response = await mock.create("k-echo", body)

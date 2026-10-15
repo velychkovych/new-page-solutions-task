@@ -115,6 +115,14 @@ async def _to_api_error(_: Request, exc: Exception) -> JSONResponse:
                 ApiErrorCode.INVALID_REQUEST,
                 summarise_validation_errors(exc.errors()),
             )
+        case StarletteHTTPException(status_code=HTTPStatus.BAD_REQUEST):
+            # FastAPI raises this when it cannot decode the body (e.g. invalid UTF-8). §1.7
+            # reserves 400 for keys and cursors, so treat it like unparseable JSON: 422.
+            return error_response(
+                HTTPStatus.UNPROCESSABLE_CONTENT,
+                ApiErrorCode.INVALID_REQUEST,
+                "the request body could not be decoded",
+            )
         case StarletteHTTPException():
             # Router-level errors (unknown path -> 404, wrong method -> 405) would otherwise
             # use Starlette's `{"detail": ...}` body.

@@ -44,6 +44,9 @@ def create_app(
         openapi_url=None,
         docs_url=None,
         redoc_url=None,
+        # A slash redirect is a 307 with no ApiError body, and a client that follows it
+        # re-sends the write to another URL. `/tickets/` is a plain 404 instead.
+        redirect_slashes=False,
     )
     install_error_handlers(app)
 
