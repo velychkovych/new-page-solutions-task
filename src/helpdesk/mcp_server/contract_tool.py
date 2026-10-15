@@ -109,7 +109,10 @@ class ToolRunner[A: BaseModel]:
         self, arguments: dict[str, Any], context: ToolContext | None, span: Span
     ) -> CallToolResult:
         try:
-            args = self.input_model.model_validate(arguments)
+            # Strict JSON mode: MCP arguments are JSON, and lax mode would accept values the
+            # advertised schema forbids (page_size=true or "7"). JSON mode still accepts
+            # enum values as strings, which strict Python mode would not.
+            args = self.input_model.model_validate_json(json.dumps(arguments), strict=True)
         except ValidationError as exc:
             # Validated here, so the mock is never called with bad arguments.
             return self._fail(span, invalid_arguments(self.name, exc))

@@ -564,6 +564,12 @@ async def test_unexpected_exception_still_gives_contract_text(
             {**COMMENT_ARGS, "extra": 1},
             "extra: Extra inputs are not permitted",
         ),
+        # Strict: the advertised schema says integer/string, so no lax coercion.
+        ("search_tickets", {"query": "vpn", "page_size": True}, "page_size: Input should be"),
+        ("search_tickets", {"query": "vpn", "page_size": "7"}, "page_size: Input should be"),
+        ("search_tickets", {"query": "vpn", "page_size": 7.5}, "page_size: Input should be"),
+        ("search_tickets", {"query": 42}, "query: Input should be a valid string"),
+        ("get_ticket", {"ticket_id": None}, "ticket_id: Input should be a valid string"),
     ],
 )
 async def test_invalid_arguments_give_exact_invalid_argument_text(
