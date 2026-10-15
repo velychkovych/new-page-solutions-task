@@ -4,12 +4,14 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Status, StatusCode
 
 from helpdesk.shared import trace_attributes as ta
+from helpdesk.telemetry import jsonl_exporter
 from helpdesk.telemetry.jsonl_exporter import JsonlSpanExporter
 from helpdesk.telemetry.records import SpanRecord
 
@@ -120,3 +122,54 @@ def test_unwritable_path_reports_failure(tmp_path: Path) -> None:
     blocker.write_text("not a directory")
     exporter = JsonlSpanExporter(blocker, "agent")
     assert exporter.export(_finished_spans()) is SpanExportResult.FAILURE
+
+
+def test_lone_surrogates_are_replaced_and_the_batch_is_kept(tmp_path: Path) -> None:
+    # json.loads("\"\\ud800\"") gives such a string, e.g. from a tool result or model text.
+    memory = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(memory))
+    tracer = provider.get_tracer("test")
+    with tracer.start_as_current_span("good"):
+        pass
+    with tracer.start_as_current_span("bad\udfff") as bad:
+        bad.set_attribute(ta.TOOL_RESULT, "abc\ud800def")
+        bad.set_attribute("list", ["ok", "x\udc80"])
+        bad.add_event("evt\ud800", {"k\ud800": "v\ud800"})
+    exporter = JsonlSpanExporter(tmp_path, "agent")
+
+    assert exporter.export(memory.get_finished_spans()) is SpanExportResult.SUCCESS
+
+    good, bad_record = (
+        json.loads(line)
+        for line in (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
+    )
+    assert good["name"] == "good"
+    assert bad_record["name"] == "bad\ufffd"
+    assert bad_record["attributes"] == {ta.TOOL_RESULT: "abc\ufffddef", "list": ["ok", "x\ufffd"]}
+    (event,) = bad_record["events"]
+    assert event["name"] == "evt\ufffd"
+    assert event["attributes"] == {"k\ufffd": "v\ufffd"}
+
+
+def test_a_record_that_cannot_be_serialised_drops_only_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    spans = _finished_spans()
+    real = jsonl_exporter.span_to_record
+
+    def broken_for_tool(span: ReadableSpan, service: str) -> SpanRecord | None:
+        record = real(span, service)
+        if record is None or span.name != ta.SPAN_TOOL:
+            return record
+        # Not JSON-serialisable: stands in for any value a future instrumentation may add.
+        return SpanRecord.model_construct(**{**dict(record), "attributes": {"x": object()}})
+
+    monkeypatch.setattr(jsonl_exporter, "span_to_record", broken_for_tool)
+    exporter = JsonlSpanExporter(tmp_path, "agent")
+
+    assert exporter.export(spans) is SpanExportResult.SUCCESS
+
+    (line,) = (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(line)["name"] == ta.SPAN_REQUEST
+    assert "dropped 1 span(s) that could not be serialised" in caplog.text

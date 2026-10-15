@@ -7,6 +7,7 @@ from pathlib import Path
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
+from pydantic_core import PydanticSerializationError
 
 from helpdesk.telemetry.records import span_to_record
 
@@ -28,15 +29,23 @@ class JsonlSpanExporter(SpanExporter):
         self._shut_down = False
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        records = [
-            record
-            for span in spans
-            if (record := span_to_record(span, self.service_name)) is not None
-        ]
-        if not records:
+        lines: list[str] = []
+        unserialisable = 0
+        for span in spans:
+            if (record := span_to_record(span, self.service_name)) is None:
+                continue
+            try:
+                lines.append(record.model_dump_json() + "\n")
+            except PydanticSerializationError:
+                # Per span: an exception out of export() makes the SDK drop the whole batch.
+                unserialisable += 1
+        if unserialisable:
+            # The count only; span content could be sensitive.
+            logger.warning("dropped %d span(s) that could not be serialised", unserialisable)
+        if not lines:
             return SpanExportResult.SUCCESS
         # One write per batch, so a reader never sees half of a batch's lines interleaved.
-        payload = "".join(record.model_dump_json() + "\n" for record in records)
+        payload = "".join(lines)
         with self._lock:
             if self._shut_down:
                 return SpanExportResult.FAILURE

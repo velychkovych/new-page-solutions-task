@@ -1,6 +1,7 @@
 """The JSONL span record (CONTRACTS §6): written by the exporter, read by show_trace and evals."""
 
 import base64
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -18,6 +19,9 @@ SPAN_ID_PATTERN = r"^[0-9a-f]{16}$"
 _NS_PER_S = 1_000_000_000
 _NS_PER_MS = 1_000_000
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# A Python str can hold a lone surrogate (json.loads of "\\ud800" makes one); UTF-8 cannot.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+_REPLACEMENT_CHAR = "\ufffd"
 
 
 class SpanEventRecord(BaseModel):
@@ -52,22 +56,33 @@ def ns_to_datetime(ns: int) -> datetime:
     return _EPOCH + timedelta(seconds=seconds, microseconds=rest // 1_000)
 
 
+def utf8_safe(text: str) -> str:
+    """`text` with lone surrogates replaced, so it can be written as UTF-8 JSON."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return _SURROGATE_RE.sub(_REPLACEMENT_CHAR, text)
+    return text
+
+
 def attribute_to_json(value: AnyValue) -> JsonValue:
     """Map an OTel attribute value (recursive since opentelemetry 1.4x) to plain JSON."""
     match value:
-        case None | str() | bool() | int() | float():
+        case str():
+            return utf8_safe(value)
+        case None | bool() | int() | float():
             return value
         case bytes():
             # Lossless, and matches how OTLP/JSON encodes bytes values.
             return base64.b64encode(value).decode("ascii")
         case Mapping():
-            return {str(k): attribute_to_json(v) for k, v in value.items()}
+            return {utf8_safe(str(k)): attribute_to_json(v) for k, v in value.items()}
         case Sequence():
             return [attribute_to_json(v) for v in value]
 
 
 def attributes_to_json(attributes: Mapping[str, AnyValue] | None) -> dict[str, JsonValue]:
-    return {key: attribute_to_json(value) for key, value in (attributes or {}).items()}
+    return {utf8_safe(key): attribute_to_json(value) for key, value in (attributes or {}).items()}
 
 
 def span_to_record(span: ReadableSpan, service: str) -> SpanRecord | None:
@@ -80,7 +95,7 @@ def span_to_record(span: ReadableSpan, service: str) -> SpanRecord | None:
         trace_id=format_trace_id(context.trace_id),
         span_id=format_span_id(context.span_id),
         parent_span_id=format_span_id(parent.span_id) if parent is not None else None,
-        name=span.name,
+        name=utf8_safe(span.name),
         service=service,
         start_time=ns_to_datetime(span.start_time),
         end_time=ns_to_datetime(span.end_time),
@@ -90,7 +105,7 @@ def span_to_record(span: ReadableSpan, service: str) -> SpanRecord | None:
         attributes=attributes_to_json(span.attributes),
         events=[
             SpanEventRecord(
-                name=event.name,
+                name=utf8_safe(event.name),
                 timestamp=ns_to_datetime(event.timestamp),
                 attributes=attributes_to_json(event.attributes),
             )
