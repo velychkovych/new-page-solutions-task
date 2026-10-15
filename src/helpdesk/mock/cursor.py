@@ -15,9 +15,11 @@ from helpdesk.mock.search import SearchFilter
 
 
 class _CursorPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # strict: lax mode would read `true`, `1.0` or `"1"` as offset 1, values never issued.
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    o: Annotated[int, Field(ge=0)]
+    # Every issued cursor is `offset + limit` with limit >= 1, so 0 is never a next_cursor.
+    o: Annotated[int, Field(ge=1)]
     f: str
 
 

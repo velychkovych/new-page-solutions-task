@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from helpdesk.mock.cursor import decode_cursor, encode_cursor
+from helpdesk.mock.cursor import decode_cursor, encode_cursor, filter_fingerprint
 from helpdesk.mock.errors import InvalidCursorError
 from helpdesk.mock.search import SearchFilter
 from helpdesk.mock.seed_data import SEED_TICKETS
@@ -194,6 +194,17 @@ def _b64(raw: bytes) -> str:
     ],
 )
 async def test_malformed_cursor_is_400(mock, cursor: str) -> None:
+    response = await mock.client.get("/tickets", params={"cursor": cursor}, headers=mock.AUTH)
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_cursor", "detail": "the cursor is malformed"}
+
+
+@pytest.mark.parametrize("offset", [True, 1.0, "1", 0])
+async def test_cursor_offset_must_be_an_issued_value(mock, offset: Any) -> None:
+    # The fingerprint is right, so only the offset's type or range can fail. A bool or a
+    # float is not an int, and next_cursor never carries 0 (offset + limit, limit >= 1).
+    fingerprint = filter_fingerprint(SearchFilter.build(None, []))
+    cursor = _b64(json.dumps({"o": offset, "f": fingerprint}).encode())
     response = await mock.client.get("/tickets", params={"cursor": cursor}, headers=mock.AUTH)
     assert response.status_code == 400
     assert response.json() == {"error": "invalid_cursor", "detail": "the cursor is malformed"}
