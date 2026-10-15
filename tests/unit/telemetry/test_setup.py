@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -8,10 +8,11 @@ import respx
 from fastapi import FastAPI
 from openinference.instrumentation.langchain import LangChainInstrumentor
 from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from helpdesk.shared import trace_attributes as ta
 from helpdesk.shared.settings import Settings
 from helpdesk.telemetry import (
     TelemetryConfigError,
@@ -19,8 +20,9 @@ from helpdesk.telemetry import (
     setup_telemetry,
     shutdown_telemetry,
 )
+from helpdesk.telemetry import setup as telemetry_setup
 from helpdesk.telemetry.jsonl_exporter import JsonlSpanExporter
-from helpdesk.telemetry.setup import build_telemetry, otlp_traces_endpoint
+from helpdesk.telemetry.setup import otlp_traces_endpoint
 
 
 def _records(path: Path) -> list[dict[str, Any]]:
@@ -40,16 +42,54 @@ def test_jsonl_only_when_no_otlp_endpoint(make_settings: Any) -> None:
     assert trace.get_tracer_provider() is telemetry.provider
 
 
-def test_otlp_exporter_added_when_endpoint_set(make_settings: Any) -> None:
-    # Nothing is sent: the test only inspects the configured exporters.
-    settings: Settings = make_settings(otel_exporter_otlp_endpoint="http://jaeger:4318")
-    telemetry = build_telemetry("mcp", settings)
+class _CapturingOtlpExporter(InMemorySpanExporter):
+    """Stands in for OTLPSpanExporter, so the test sees what would be sent to Jaeger."""
 
-    jsonl, otlp = telemetry.exporters
-    assert isinstance(jsonl.inner, JsonlSpanExporter)
-    assert isinstance(otlp.inner, OTLPSpanExporter)
-    assert otlp.inner._endpoint == "http://jaeger:4318/v1/traces"
-    telemetry.provider.shutdown()
+    created: ClassVar[list[_CapturingOtlpExporter]] = []
+
+    def __init__(self, endpoint: str) -> None:
+        super().__init__()
+        self.endpoint = endpoint
+        _CapturingOtlpExporter.created.append(self)
+
+
+@pytest.fixture
+def fake_otlp(monkeypatch: pytest.MonkeyPatch) -> list[_CapturingOtlpExporter]:
+    _CapturingOtlpExporter.created = []
+    monkeypatch.setattr(telemetry_setup, "OTLPSpanExporter", _CapturingOtlpExporter)
+    return _CapturingOtlpExporter.created
+
+
+def test_otlp_exporter_receives_redacted_spans_when_endpoint_set(
+    make_settings: Any, fake_otlp: list[_CapturingOtlpExporter], secrets: tuple[str, ...]
+) -> None:
+    settings: Settings = make_settings(otel_exporter_otlp_endpoint="http://jaeger:4318")
+    telemetry = setup_telemetry("mcp", settings)
+    with trace.get_tracer("test").start_as_current_span("call") as span:
+        span.set_attribute("http.request.header.authorization", f"Bearer {secrets[0]}")
+        span.set_attribute(ta.TOOL_ARGS, f"token={secrets[0]}")
+    assert telemetry.flush()
+
+    (otlp,) = fake_otlp
+    assert otlp.endpoint == "http://jaeger:4318/v1/traces"
+    (exported,) = otlp.get_finished_spans()
+    # Only through the redacting wrapper, never the raw exporter.
+    assert exported.attributes == {ta.TOOL_ARGS: "token=[REDACTED]"}
+    # The JSONL file gets the same span: OTLP is an addition, not a replacement.
+    assert [r["name"] for r in _records(settings.traces_dir / "mcp.jsonl")] == ["call"]
+
+
+def test_no_otlp_exporter_without_endpoint(
+    make_settings: Any, fake_otlp: list[_CapturingOtlpExporter]
+) -> None:
+    settings: Settings = make_settings()
+    telemetry = setup_telemetry("mcp", settings)
+    with trace.get_tracer("test").start_as_current_span("call"):
+        pass
+    assert telemetry.flush()
+
+    assert fake_otlp == []
+    assert [r["name"] for r in _records(settings.traces_dir / "mcp.jsonl")] == ["call"]
 
 
 @pytest.mark.parametrize(
