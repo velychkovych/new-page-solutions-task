@@ -437,3 +437,105 @@ async def test_pending_action_present_iff_awaiting_approval(
             response.status is ChatStatus.AWAITING_APPROVAL
         )
     assert json.loads(done.model_dump_json())["pending_action"] is None
+
+
+async def _hang(_args):
+    await asyncio.sleep(30)
+    raise AssertionError("the turn deadline should have cancelled this call")
+
+
+async def test_deadline_during_the_write_does_not_claim_nothing_changed(
+    make_client, provider, fake_model, make_ai
+):
+    # The write is in flight when the deadline fires: the mock may already have saved it.
+    provider.replies["create_ticket"] = [_hang]
+    client, _, _ = await _propose(
+        make_client,
+        provider,
+        fake_model,
+        make_ai,
+        make_ai("Created."),
+        make_ai("Hello."),
+        turn_deadline_s=0.5,
+    )
+
+    stopped = await _chat(client, message="yes")
+
+    assert stopped.status is ChatStatus.ERROR
+    assert stopped.reply == turn_errors.DEADLINE_WRITE_UNFINISHED_REPLY
+    assert "Nothing was changed" not in stopped.reply
+    assert stopped.pending_action is None
+
+    later = await _chat(client, message="hello?")
+    keys = [w.idempotency_key for w in provider.writes()]
+    assert len(keys) == 2
+    assert len(set(keys)) == 1
+    assert later.reply == "Hello."
+
+
+async def test_deadline_after_the_write_says_the_change_was_made(
+    make_client, provider, fake_model, make_ai
+):
+    client, model, _ = await _propose(
+        make_client, provider, fake_model, make_ai, make_ai("Created."), turn_deadline_s=0.5
+    )
+    model.delay_s = 30.0  # the follow-up model call after the write never returns in time
+
+    stopped = await _chat(client, message="yes")
+
+    assert stopped.status is ChatStatus.ERROR
+    assert stopped.reply == turn_errors.DEADLINE_AFTER_WRITE_REPLY
+    assert [r.name for r in stopped.tool_calls] == ["create_ticket"]
+    assert len(provider.writes()) == 1
+
+
+async def test_deadline_before_any_write_says_nothing_changed(
+    make_client, provider, fake_model, make_ai
+):
+    provider.replies["search_tickets"] = [_hang]
+    client = await make_client(_proposal_script(fake_model, make_ai), provider, turn_deadline_s=0.3)
+
+    stopped = await _chat(client, message="My laptop battery dies within an hour")
+
+    assert stopped.status is ChatStatus.ERROR
+    assert stopped.reply == turn_errors.DEADLINE_REPLY
+    assert provider.writes() == []
+
+
+async def test_a_proposal_cut_off_before_the_interrupt_is_shown_before_any_decision(
+    make_client, provider, fake_model, make_ai
+):
+    # load_context, agent, tools, agent, propose: the limit stops the run before approval.
+    model = _proposal_script(fake_model, make_ai, make_ai("Created."))
+    client = await make_client(model, provider, recursion_limit=5)
+    stopped = await _chat(client, message="My laptop battery dies within an hour")
+    assert stopped.status is ChatStatus.ERROR
+    assert stopped.pending_action is None
+    view = SessionView.model_validate((await client.get("/sessions/alice/s1")).json())
+    assert view.pending_action is None
+
+    # "yes" cannot approve an action the user was never shown: show it instead.
+    shown = await _chat(client, message="yes")
+    assert shown.status is ChatStatus.AWAITING_APPROVAL
+    assert shown.pending_action is not None
+    assert CREATE_ARGS["title"] in shown.reply
+    assert provider.writes() == []
+
+    done = await _chat(client, message="yes")
+    assert done.status is ChatStatus.OK
+    assert len(provider.writes()) == 1
+
+
+async def test_a_decision_for_a_cut_off_proposal_is_stale(
+    make_client, provider, fake_model, make_ai
+):
+    model = _proposal_script(fake_model, make_ai, make_ai("Created."))
+    client = await make_client(model, provider, recursion_limit=5)
+    await _chat(client, message="My laptop battery dies within an hour")
+
+    result = await _chat(client, decision={"action_id": "guessed", "approve": True})
+
+    assert result.reply == STALE_DECISION_REPLY
+    assert result.status is ChatStatus.AWAITING_APPROVAL
+    assert result.pending_action is not None
+    assert provider.writes() == []

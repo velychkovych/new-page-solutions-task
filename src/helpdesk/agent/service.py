@@ -21,10 +21,15 @@ from helpdesk.agent.transcript import (
     session_messages,
     tool_call_records,
 )
-from helpdesk.agent.turn_errors import DEADLINE_REPLY, turn_error_reply
+from helpdesk.agent.turn_errors import (
+    DEADLINE_AFTER_WRITE_REPLY,
+    DEADLINE_REPLY,
+    DEADLINE_WRITE_UNFINISHED_REPLY,
+    turn_error_reply,
+)
 from helpdesk.shared import trace_attributes as attrs
 from helpdesk.shared.api import ChatRequest, ChatResponse, ChatStatus, SessionView
-from helpdesk.shared.approval import PendingAction, classify_decision_text
+from helpdesk.shared.approval import PendingAction, WriteResult, classify_decision_text
 from helpdesk.shared.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -38,6 +43,10 @@ def reask_reply(pending: PendingAction) -> str:
         f"An action is waiting for your decision: {pending.summary}. "
         'Please reply "yes" to approve it or "no" to decline it.'
     )
+
+
+def cut_off_proposal_reply(pending: PendingAction) -> str:
+    return f"My last reply was cut off before I could ask you about this. {reask_reply(pending)}"
 
 
 def proposal_reply(ai_text: str, pending: PendingAction) -> str:
@@ -58,13 +67,42 @@ def _messages(snapshot: StateSnapshot) -> list[BaseMessage]:
     return [m for m in messages if isinstance(m, BaseMessage)]
 
 
+def _values(snapshot: StateSnapshot) -> dict[str, object]:
+    return snapshot.values if isinstance(snapshot.values, dict) else {}
+
+
 def awaiting_approval(snapshot: StateSnapshot) -> PendingAction | None:
-    """The pending action, if the graph is stopped at the approval interrupt."""
-    values = snapshot.values if isinstance(snapshot.values, dict) else {}
-    pending = values.get("pending_action")
-    if isinstance(pending, PendingAction) and Node.APPROVAL in snapshot.next:
+    """The pending action, if the graph is stopped at the approval interrupt.
+
+    Without the interrupt the proposal was never returned to the user (the run stopped
+    between propose and approval), so it cannot be approved yet.
+    """
+    pending = _values(snapshot).get("pending_action")
+    if (
+        isinstance(pending, PendingAction)
+        and Node.APPROVAL in snapshot.next
+        and snapshot.interrupts
+    ):
         return pending
     return None
+
+
+def proposal_cut_off(snapshot: StateSnapshot) -> bool:
+    return Node.APPROVAL in snapshot.next and not snapshot.interrupts
+
+
+def _last_write_id(snapshot: StateSnapshot) -> str | None:
+    last_write = _values(snapshot).get("last_write")
+    return last_write.action_id if isinstance(last_write, WriteResult) else None
+
+
+def deadline_reply(before: StateSnapshot, after: StateSnapshot) -> str:
+    """Never tell the user nothing changed when a write may have happened."""
+    if Node.EXECUTE_WRITE in after.next:
+        return DEADLINE_WRITE_UNFINISHED_REPLY
+    if _last_write_id(after) != _last_write_id(before):
+        return DEADLINE_AFTER_WRITE_REPLY
+    return DEADLINE_REPLY
 
 
 class ChatService:
@@ -94,8 +132,9 @@ class ChatService:
             # The lock covers the whole turn, so a second approval waits and then sees
             # the action already handled. The deadline starts once the lock is held.
             async with self._locks.hold(thread):
-                before = {m.id for m in _messages(await self._graph.aget_state(config))}
-                outcome = await self._limited_turn(request, config, span)
+                start = await self._graph.aget_state(config)
+                before = {m.id for m in _messages(start)}
+                outcome = await self._limited_turn(request, config, span, start)
                 after = _messages(await self._graph.aget_state(config))
             new_ids = {m.id for m in after if m.id is not None and m.id not in before}
             span.set_attribute(attrs.REQUEST_STATUS, outcome.status.value)
@@ -112,18 +151,19 @@ class ChatService:
             )
 
     async def _limited_turn(
-        self, request: ChatRequest, config: RunnableConfig, span: Span
+        self, request: ChatRequest, config: RunnableConfig, span: Span, start: StateSnapshot
     ) -> TurnOutcome:
         try:
             async with asyncio.timeout(self._settings.turn_deadline_s):
                 return await self._turn(request, config)
         except TimeoutError as error:
-            return self._failed(span, error, DEADLINE_REPLY)
+            stopped = await self._graph.aget_state(config)
+            return self._failed(span, error, deadline_reply(start, stopped))
         except Exception as error:
-            reply = turn_error_reply(error)
-            if reply is None:
+            known = turn_error_reply(error)
+            if known is None:
                 raise
-            return self._failed(span, error, reply)
+            return self._failed(span, error, known)
 
     @staticmethod
     def _failed(span: Span, error: BaseException, reply: str) -> TurnOutcome:
@@ -139,6 +179,18 @@ class ChatService:
             # it before anything else: same key, so the mock replays instead of writing twice.
             await self._graph.ainvoke(None, config)
             snapshot = await self._graph.aget_state(config)
+        if proposal_cut_off(snapshot):
+            # The last turn stopped (recursion limit, deadline) after propose but before
+            # the interrupt, so the user never saw the proposal. Raise the interrupt now;
+            # approval has no side effects, so this writes nothing.
+            await self._graph.ainvoke(None, config)
+            snapshot = await self._graph.aget_state(config)
+            shown = awaiting_approval(snapshot)
+            if shown is not None and request.decision is None:
+                # Not even "yes" counts here: it cannot approve an action never shown.
+                return TurnOutcome(
+                    cut_off_proposal_reply(shown), ChatStatus.AWAITING_APPROVAL, shown
+                )
         pending = awaiting_approval(snapshot)
 
         if request.decision is not None:

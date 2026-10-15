@@ -17,9 +17,21 @@ from langchain_core.exceptions import (
 )
 from langgraph.errors import GraphRecursionError
 
+# Only true when no write ran in the turn: deadline_reply picks the honest variant.
 DEADLINE_REPLY = (
     "Sorry, this request took too long and was stopped. Nothing was changed by the "
     "unfinished step. Please try again."
+)
+# The write call was in flight: the server may already have saved it. The next request
+# re-runs it with the same idempotency key, so it is finished without a duplicate.
+DEADLINE_WRITE_UNFINISHED_REPLY = (
+    "Sorry, this request took too long and was stopped while your approved change was "
+    "being saved. It may already have gone through. Send any message and I will finish "
+    "it; it will not be made twice."
+)
+DEADLINE_AFTER_WRITE_REPLY = (
+    "Your approved change was saved, but the rest of this request took too long and was "
+    "stopped. Please ask again if you need anything else."
 )
 RECURSION_REPLY = (
     "Sorry, I could not finish this request within my step limit. Please try again, "
