@@ -1,13 +1,19 @@
 """Graph topology, router and node rules (CONTRACTS §5.1, §5.3)."""
 
+from typing import Any
+
 import pytest
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
+from pydantic import Field, SecretStr
 
 from helpdesk.agent.decision import resume_value
 from helpdesk.agent.graph import InjectedArgumentVisibleError
 from helpdesk.agent.prompt import SYSTEM_PROMPT_ID
+from helpdesk.agent.prompt_caching import CACHE_CONTROL
 from helpdesk.agent.routing import ONE_CHANGE_AT_A_TIME
 from helpdesk.agent.run_config import build_run_config
 from helpdesk.agent.tool_messages import TRANSPORT_FAILURE, USER_DECLINED
@@ -323,6 +329,59 @@ async def test_system_prompt_is_first_and_replaced_not_duplicated(
     for call in model.calls:
         assert isinstance(call[0], SystemMessage)
         assert sum(isinstance(m, SystemMessage) for m in call) == 1
+
+
+class RecordingAnthropic(ChatAnthropic):
+    """ChatAnthropic that records what the agent node sends instead of calling the API."""
+
+    calls: list[tuple[list[BaseMessage], dict[str, Any]]] = Field(default_factory=list)
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self.calls.append((list(messages), kwargs))
+        return ChatResult(generations=[ChatGeneration(message=AIMessage("Hi."))])
+
+
+async def test_agent_node_marks_the_system_prompt_and_tools_cacheable(make_graph, provider):
+    model = RecordingAnthropic(model="claude-test", api_key=SecretStr("not-a-real-key"))
+    graph = await make_graph(model, provider)
+    await graph.ainvoke(_start("hello"), CONFIG)
+
+    [(messages, kwargs)] = model.calls
+    system = messages[0]
+    assert isinstance(system, SystemMessage)
+    assert isinstance(system.content, list)
+    assert system.content[-1]["cache_control"] == CACHE_CONTROL
+    assert kwargs["cache_control"] == CACHE_CONTROL
+    assert kwargs["tools"][-1]["cache_control"] == CACHE_CONTROL
+    # The checkpoint keeps the plain prompt; the cache marker only shapes the request.
+    state = (await graph.aget_state(CONFIG)).values
+    assert isinstance(state["messages"][0].content, str)
+
+
+@pytest.mark.parametrize("case", [(8_000, True), (60, False)], ids=["default", "small"])
+async def test_agent_node_trims_history_with_the_configured_budget(
+    make_graph, provider, fake_model, make_ai, case
+):
+    budget, sees_first_turn = case
+    first = "My laptop will not connect to the office printer. " * 10
+    model = fake_model(responses=[make_ai("One."), make_ai("Two."), make_ai("Three.")])
+    graph = await make_graph(model, provider, history_token_budget=budget)
+    for text in (first, "second question", "third question"):
+        await graph.ainvoke(_start(text), CONFIG)
+
+    seen = [m.content for m in model.calls[-1] if isinstance(m, HumanMessage)]
+    assert (first in seen) is sees_first_turn
+    assert seen[-2:] == ["second question", "third question"]
+    assert isinstance(model.calls[-1][0], SystemMessage)
+    # Trimming shapes the model input only: the checkpoint keeps every message.
+    state = (await graph.aget_state(CONFIG)).values
+    assert sum(isinstance(m, HumanMessage) for m in state["messages"]) == 3
 
 
 async def test_model_sees_no_injected_args(make_graph, provider, fake_model, make_ai):
