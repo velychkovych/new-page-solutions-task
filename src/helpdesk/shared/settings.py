@@ -19,7 +19,10 @@ PositiveSeconds = Annotated[float, Field(gt=0.0)]
 
 
 class ModelProvider(StrEnum):
+    """Config values. The model factory maps them to `init_chat_model` providers (CONTRACTS §7)."""
+
     ANTHROPIC = "anthropic"
+    # -> init_chat_model provider "anthropic_bedrock" (ChatAnthropicBedrock), not legacy "bedrock".
     BEDROCK = "bedrock"
     OPENAI = "openai"
     FAKE = "fake"
@@ -88,9 +91,6 @@ class Settings(BaseSettings):
     model_provider: ModelProvider = ModelProvider.ANTHROPIC
     model_name: str = "claude-sonnet-5-5"
     model_max_tokens: Annotated[int, Field(ge=1)] = 1_024
-    # None = provider default. The installed langchain-anthropic rejects any other value
-    # for claude-sonnet-5-5 at request time; claude-haiku-5-5 accepts a low value.
-    model_temperature: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
     model_timeout_s: PositiveSeconds = 60.0
     # SDK retries for the *model* API (429/529). Tool retries live only in the MCP server.
     model_max_retries: Annotated[int, Field(ge=0, le=10)] = 2

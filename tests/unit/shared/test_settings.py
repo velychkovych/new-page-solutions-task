@@ -54,11 +54,11 @@ def _clear_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_empty_values_mean_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # Compose passes `${VAR:-}` as an empty string; .env.example has `KEY=` lines.
     _clear_settings_env(monkeypatch)
-    for name in ("CHAOS_SEED", "MODEL_TEMPERATURE", "FAKE_MODEL_SCRIPT", "AWS_REGION"):
+    for name in ("CHAOS_SEED", "OTEL_EXPORTER_OTLP_ENDPOINT", "FAKE_MODEL_SCRIPT", "AWS_REGION"):
         monkeypatch.setenv(name, "")
     settings = Settings(_env_file=None)
     assert settings.chaos_seed == 0
-    assert settings.model_temperature is None
+    assert settings.otel_exporter_otlp_endpoint is None
     assert settings.fake_model_script is None
     assert settings.aws_region is None
 
@@ -67,7 +67,6 @@ def test_loads_env_example(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_settings_env(monkeypatch)
     settings = Settings(_env_file=ROOT / ".env.example")
     assert settings.mock_api_token is None
-    assert settings.model_temperature is None
     assert settings.otel_exporter_otlp_endpoint is None
 
 
@@ -77,3 +76,8 @@ def test_chaos_failure_rates_must_fit_one_draw(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("CHAOS_ERROR_RATE", "0.5")
     with pytest.raises(ValueError, match="must be <= 1"):
         Settings(_env_file=None)
+
+
+def test_no_temperature_setting() -> None:
+    # Author's decision: no temperature is set for any model (claude-sonnet-5-5 rejects it).
+    assert not [name for name in Settings.model_fields if "temperature" in name]

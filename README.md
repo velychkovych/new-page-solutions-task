@@ -64,8 +64,8 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
   - LangGraph custom `StateGraph` (not `create_react_agent`)
   - model built with `init_chat_model`
   - default `claude-sonnet-5-5` through `langchain-anthropic`
-- Providers, selected by config only: `anthropic`, `bedrock`, `openai`, and `fake` (scripted,
-  for tests).
+- Providers, selected by config only: `anthropic`, `bedrock` (Claude on Bedrock via
+  `ChatAnthropicBedrock`), `openai`, and `fake` (scripted, for tests).
 
 ### State and approval
 
@@ -203,8 +203,7 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
   - visual design
   - expiry of pending approvals
   - cleanup or retention jobs for old checkpoints
-- `claude-sonnet-5-5` does not accept a non-default `temperature` in the installed
-  `langchain-anthropic`, so `MODEL_TEMPERATURE` is empty by default.
+- No `temperature` is set for any model; every provider runs with its default.
 
 ## Demo
 

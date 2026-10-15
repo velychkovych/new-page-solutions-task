@@ -534,6 +534,19 @@ Every field is typed concretely, never `Any`, so the checkpointer can deserialis
   Host tooling reaches the mock with `docker compose exec mock ...`, which runs inside the
   mock container. This covers `make chaos-on`/`chaos-off`/`seed` and the eval runner's
   reset, chaos and `/admin/writes` calls. The tokens never reach the host shell.
+- Model providers. The model factory maps `MODEL_PROVIDER` to `init_chat_model`; no other
+  code path builds a model:
+
+  | `MODEL_PROVIDER` | `init_chat_model` provider | Class |
+  |---|---|---|
+  | `anthropic` (default) | `anthropic` | `langchain_anthropic.ChatAnthropic` |
+  | `bedrock` | `anthropic_bedrock` (**not** the legacy `bedrock`) | `langchain_aws.ChatAnthropicBedrock`, a `ChatAnthropic` subclass, so prompt caching and error mapping are shared; region from `AWS_REGION` |
+  | `openai` | `openai` | `langchain_openai.ChatOpenAI` |
+  | `fake` | none (`init_chat_model` has no fake provider) | scripted fake model, from `FAKE_MODEL_SCRIPT` |
+
+- **No `temperature` is passed to any model**, for any provider. The installed
+  `langchain-anthropic` rejects a non-default value for `claude-sonnet-5-5`. `max_tokens`,
+  the request timeout and SDK `max_retries` come from `Settings`.
 - Config is read only through `helpdesk.shared.settings.Settings`. Every field is listed in
   `.env.example`, and a unit test enforces this.
 

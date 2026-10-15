@@ -228,3 +228,26 @@ Factual log of AI-assisted work (see CLAUDE.md → Workflow). The author writes 
 
 - A `POST /admin/reset` route would let the eval runner reset the mock over HTTP instead of
   `docker compose exec`. Not added, since it is not in PLAN §3.1.
+
+---
+
+## 2026-10-16 — Phase 0 follow-up: author decisions
+
+- **Python:** 3.14 everywhere. `CLAUDE.md` on disk already said 3.14 when it was committed, so
+  deviation 1 above no longer applies. `.python-version`, `requires-python`, mypy, ruff and the
+  Docker image are all 3.14. Python 3.15 is not used.
+- **Temperature:** not used anywhere.
+  - `MODEL_TEMPERATURE` was removed from `Settings`, `.env.example` and compose.
+  - `test_no_temperature_setting` guards against it coming back.
+  - Following the author's instruction ("temperature shouldn't be used anywhere"), the
+    PLAN.md §1 line now says "Do **not** set `temperature`".
+  - CONTRACTS §7 now says no model gets a temperature.
+- **Contracts:** the deviation-11 choices are accepted as written.
+- **Bedrock:** `MODEL_PROVIDER=bedrock` maps to `init_chat_model(..., model_provider="anthropic_bedrock")`.
+  - Verified against the installed source: `langchain/chat_models/base.py:58`.
+  - A runtime check built `langchain_aws.ChatAnthropicBedrock`, an `isinstance` of
+    `ChatAnthropic`, with no credentials.
+  - The mapping is recorded in CONTRACTS §7 (a provider table), in PLAN.md §1 and in a
+    `ModelProvider` comment.
+- Verified: `make lint typecheck test` → `All checks passed!`, `Success: no issues found in
+  15 source files`, `103 passed`. `docker compose config` is valid.
