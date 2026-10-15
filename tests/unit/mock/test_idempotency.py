@@ -3,12 +3,21 @@
 import asyncio
 import hashlib
 import json
+import sqlite3
 
+import aiosqlite
 import pytest
 
+from helpdesk.mock.db import connect
 from helpdesk.mock.errors import InvalidIdempotencyKeyError, MissingIdempotencyKeyError
-from helpdesk.mock.idempotency import request_fingerprint, validate_key
-from helpdesk.shared.tickets import AddCommentRequest, CreateTicketRequest, TicketPriority
+from helpdesk.mock.idempotency import IdempotentWriter, request_fingerprint, validate_key
+from helpdesk.mock.repository import create_ticket
+from helpdesk.shared.tickets import (
+    AddCommentRequest,
+    CreateTicketRequest,
+    Ticket,
+    TicketPriority,
+)
 
 
 async def test_replay_returns_stored_response_without_executing(mock) -> None:
@@ -110,6 +119,31 @@ async def test_422_is_not_stored(mock) -> None:
     good = await mock.create("k-later")
     assert good.status_code == 201
     assert "Idempotent-Replay" not in good.headers
+
+
+@pytest.mark.parametrize("table", ["idempotency_records", "write_counts"])
+async def test_write_and_its_key_commit_together(mock, table: str) -> None:
+    """§1.5: the failure lands after the write but before its bookkeeping, so a write
+    committed ahead of its key would survive here."""
+    db_path = mock.settings.mock_db_path
+    async with connect(db_path) as conn:
+        await conn.execute(
+            f"CREATE TRIGGER fail_{table} BEFORE INSERT ON {table} "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+    request = CreateTicketRequest.model_validate(mock.NEW_TICKET)
+
+    async def operation(conn: aiosqlite.Connection) -> Ticket:
+        return await create_ticket(conn, request, mock.FIXED_NOW)
+
+    writer = IdempotentWriter(db_path)
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        await writer.run("k-atomic", "fp", 201, operation)
+    assert len(await mock.all_ids()) == 15
+    assert await mock.writes() == {"total": 0, "by_key": {}}
+    async with connect(db_path) as conn:
+        rows = await conn.execute_fetchall("SELECT key FROM idempotency_records")
+    assert list(rows) == []
 
 
 async def test_concurrent_same_key_executes_once(mock) -> None:

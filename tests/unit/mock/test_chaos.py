@@ -1,6 +1,8 @@
 """CONTRACTS §1.6: seeded chaos middleware and fail-after-commit (PLAN §8 row 5)."""
 
+import random
 from collections import Counter
+from http import HTTPStatus
 from typing import Any
 
 import pytest
@@ -36,6 +38,31 @@ def test_engine_rates_are_roughly_respected() -> None:
     # 500 vs 503 is a fair coin among the errors.
     assert abs(outcomes[ChaosOutcome.SERVER_ERROR] / errors - 0.5) < 0.1
     assert abs(sum(d.slow for d in decisions) / CALLS - 0.1) < TOLERANCE
+
+
+def test_draw_order_matches_the_contract() -> None:
+    """§1.6: slow first, then one uniform `u`, then the 500/503 choice only on an error.
+    Comparing against a hand-driven `random.Random` pins the order, not just the rates."""
+    rates = {"rate_limit_rate": 0.3, "error_rate": 0.3, "slow_rate": 0.5}
+    engine = _engine(seed=2024, **rates)
+    rng = random.Random(2024)  # noqa: S311
+    expected = []
+    for _ in range(500):
+        slow = rng.random() < rates["slow_rate"]
+        u = rng.random()
+        if u < rates["rate_limit_rate"]:
+            outcome = ChaosOutcome.RATE_LIMITED
+        elif u < rates["rate_limit_rate"] + rates["error_rate"]:
+            status = rng.choice((HTTPStatus.INTERNAL_SERVER_ERROR, HTTPStatus.SERVICE_UNAVAILABLE))
+            outcome = (
+                ChaosOutcome.SERVER_ERROR
+                if status is HTTPStatus.INTERNAL_SERVER_ERROR
+                else ChaosOutcome.SERVICE_UNAVAILABLE
+            )
+        else:
+            outcome = ChaosOutcome.PASS
+        expected.append((slow, outcome))
+    assert [(d.slow, d.outcome) for d in (engine.decide() for _ in range(500))] == expected
 
 
 def test_same_seed_same_sequence_and_reconfigure_restarts_it() -> None:
