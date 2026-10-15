@@ -186,15 +186,16 @@ def test_has_no_inline_event_handler_attributes(page: _Collector) -> None:
         assert not [k for k in attrs if k.startswith("on")], tag
 
 
-def test_jaeger_url_comes_from_a_meta_tag_or_query_parameter(page: _Collector, script: str) -> None:
+def test_jaeger_url_comes_only_from_the_meta_tag(page: _Collector, script: str) -> None:
     metas = [
         attrs
         for tag, attrs in page.tags
         if tag == "meta" and attrs.get("name") == "helpdesk-jaeger-ui-url"
     ]
     assert metas == [{"name": "helpdesk-jaeger-ui-url", "content": ""}]
-    assert 'params.get("jaeger")' in script
-    assert "/trace/${traceId}" in script
+    # No query-string override (test_page_behaviour checks the link itself).
+    assert 'params.get("jaeger")' not in script
+    assert "`trace/${traceId}`" in script
     # Only http(s) bases become links.
     assert 'url.protocol !== "http:" && url.protocol !== "https:"' in script
 

@@ -7,7 +7,8 @@
      injection or HTML), so the page loads nothing external and talks only to its origin. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <!-- Jaeger UI base URL for trace links. Empty = no link. The agent can fill this from
-     Settings.jaeger_ui_url when it serves the page; ?jaeger=<url> overrides it. -->
+     Settings.jaeger_ui_url when it serves the page. There is deliberately no query-string
+     override: a crafted link to this page must not be able to point the trace link anywhere. -->
 <meta name="helpdesk-jaeger-ui-url" content="">
 <link rel="icon" href="data:,">
 <title>IT Helpdesk</title>
@@ -216,10 +217,13 @@ function createSseParser(onEvent) {
   const fixture = fixtureName(params.get("fixture"));
   const fixtureSession = fixture ? fixtureName(params.get("fixture_session")) : null;
   const jaegerMeta = document.querySelector('meta[name="helpdesk-jaeger-ui-url"]');
-  const jaegerBase = httpBase(params.get("jaeger") ?? (jaegerMeta ? jaegerMeta.content : ""));
+  const jaegerBase = httpBase(jaegerMeta ? jaegerMeta.content : "");
 
   let busy = false;
   let pendingAction = null;
+  // The identity the pending action was shown for, so a decision is never sent under
+  // another user or session id.
+  let pendingKey = null;
   let turnCount = 0;
 
   // --- small helpers -----------------------------------------------------------
@@ -251,13 +255,18 @@ function createSseParser(onEvent) {
   }
 
   // Only http(s) bases are accepted, so a crafted value cannot become a javascript: link.
+  // Returns the base with exactly one trailing "/" and no query or fragment, which would
+  // otherwise swallow the "trace/<id>" that is resolved against it.
   function httpBase(raw) {
     const value = text(raw).trim();
     if (!value) return "";
     try {
       const url = new URL(value);
       if (url.protocol !== "http:" && url.protocol !== "https:") return "";
-      return url.href.replace(/\/+$/, "");
+      url.search = "";
+      url.hash = "";
+      url.pathname = url.pathname.replace(/\/+$/, "") + "/";
+      return url.href;
     } catch {
       return "";
     }
@@ -279,6 +288,11 @@ function createSseParser(onEvent) {
     const bytes = new Uint8Array(12);
     crypto.getRandomValues(bytes);
     return "s-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // "/" cannot occur in an id, so the key is unambiguous.
+  function identityKey(identity) {
+    return identity ? `${identity.userId}/${identity.sessionId}` : null;
   }
 
   function readIdentity() {
@@ -330,9 +344,10 @@ function createSseParser(onEvent) {
     syncControls();
   }
 
-  function setPending(action) {
+  function setPending(action, key = null) {
     pendingAction = action && typeof action === "object" && typeof action.action_id === "string"
       ? action : null;
+    pendingKey = pendingAction ? key : null;
     ui.pending.hidden = pendingAction === null;
     ui.pendingSummary.textContent = pendingAction ? text(pendingAction.summary) : "";
     ui.pendingTool.textContent = pendingAction ? text(pendingAction.tool) : "";
@@ -360,7 +375,7 @@ function createSseParser(onEvent) {
     return { item, body, meta };
   }
 
-  function startTurn(userLabel) {
+  function startTurn(userLabel, identity) {
     turnCount += 1;
     if (userLabel) appendMessage("user", userLabel);
     const bubble = appendMessage("assistant", "");
@@ -370,7 +385,7 @@ function createSseParser(onEvent) {
     ui.timeline.append(el("li", { class: "turn" }, header, calls));
     return {
       bubble, header, calls, rows: new Map(), reply: "", pending: null, error: null,
-      done: false, needsReload: false,
+      done: false, needsReload: false, key: identityKey(identity),
     };
   }
 
@@ -435,7 +450,7 @@ function createSseParser(onEvent) {
     const nodes = [el("code", {}, traceId)];
     if (jaegerBase) {
       nodes.push(" ", el("a", {
-        href: `${jaegerBase}/trace/${traceId}`, target: "_blank", rel: "noopener noreferrer",
+        href: new URL(`trace/${traceId}`, jaegerBase).href, target: "_blank", rel: "noopener noreferrer",
       }, "open in Jaeger"));
     }
     return nodes;
@@ -454,7 +469,7 @@ function createSseParser(onEvent) {
     if (!turn.reply && !turn.error) turn.bubble.body.textContent = "(no reply text)";
     if (status === "awaiting_approval") {
       if (pending) {
-        setPending(pending);
+        setPending(pending, turn.key);
         setStatus(`Awaiting approval: ${text(pending.summary)}`, "waiting");
       } else {
         // Contract breach (no approval_required); the session view is authoritative.
@@ -471,17 +486,22 @@ function createSseParser(onEvent) {
     }
   }
 
-  function renderSession(view) {
+  function clearView() {
     ui.messages.replaceChildren();
     ui.timeline.replaceChildren(el("li", { class: "empty" }, "Tool calls of new turns appear here."));
     turnCount = 0;
+    setPending(null);
+  }
+
+  function renderSession(view, identity) {
+    clearView();
     const messages = Array.isArray(view.messages) ? view.messages : [];
     for (const message of messages) {
       const content = text(message && message.content);
       if (message && message.role === "assistant" && content === "") continue;
       appendMessage(text(message && message.role), content, text(message && message.tool_name));
     }
-    setPending(view.pending_action || null);
+    setPending(view.pending_action || null, identityKey(identity));
     if (pendingAction) setStatus(`Awaiting approval: ${text(pendingAction.summary)}`, "waiting");
     else setStatus(messages.length ? `Session loaded (${messages.length} messages).` : "New session.");
   }
@@ -507,13 +527,17 @@ function createSseParser(onEvent) {
     return "The request was rejected (HTTP 422).";
   }
 
-  async function loadSession(identity) {
+  // clearOnFailure: the screen may show another session (the ids changed), so on failure
+  // it is cleared rather than left with that session's messages and decision buttons.
+  // After a turn in the same session the view is kept, so the turn's error stays visible.
+  async function loadSession(identity, { clearOnFailure = false } = {}) {
     const path = `/sessions/${encodeURIComponent(identity.userId)}/${encodeURIComponent(identity.sessionId)}`;
     try {
       const resp = await apiFetch(path, { headers: { accept: "application/json" } });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      renderSession(await resp.json());
+      renderSession(await resp.json(), identity);
     } catch (err) {
+      if (clearOnFailure) clearView();
       setStatus(`Could not load the session: ${describe(err)}`, "error");
     }
   }
@@ -527,7 +551,7 @@ function createSseParser(onEvent) {
     }
     saveIdentity(identity);
     setBusy(true);
-    try { await loadSession(identity); } finally { setBusy(false); }
+    try { await loadSession(identity, { clearOnFailure: true }); } finally { setBusy(false); }
   }
 
   function handleEvent(turn, name, raw) {
@@ -607,6 +631,12 @@ function createSseParser(onEvent) {
         const { value, done } = await reader.read();
         if (done) break;
         parser.push(decoder.decode(value, { stream: true }));
+        if (turn.done) {
+          // done is last (§4). Stop reading: a server or proxy that keeps the connection
+          // open (": ping") would otherwise keep the controls disabled.
+          reader.cancel().catch(() => { /* already closed */ });
+          return "handled";
+        }
       }
       parser.push(decoder.decode());
       parser.end();
@@ -668,7 +698,7 @@ function createSseParser(onEvent) {
     saveIdentity(identity);
     const body = { user_id: identity.userId, session_id: identity.sessionId, ...input };
     setBusy(true);
-    const turn = startTurn(userLabel);
+    const turn = startTurn(userLabel, identity);
     setStatus("Sending…");
     try {
       const outcome = await streamTurn(body, turn);
@@ -756,6 +786,13 @@ function createSseParser(onEvent) {
 
   function decide(approve) {
     if (busy || !pendingAction) return;
+    const identity = readIdentity();
+    if (identity && identityKey(identity) !== pendingKey) {
+      // The ids were edited after the action was shown: the action belongs to another
+      // session, so load the one now selected instead of sending it there.
+      reloadSession();
+      return;
+    }
     const action = pendingAction;
     const label = `${approve ? "Approve" : "Decline"}: ${text(action.summary)}`;
     runTurn({ decision: { action_id: action.action_id, approve } }, label);
