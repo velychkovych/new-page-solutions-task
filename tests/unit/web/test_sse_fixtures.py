@@ -1,8 +1,8 @@
 """The web fixtures are valid §4 streams, and a correct incremental parser reads them.
 
 The parser below mirrors the one in web/index.html (same algorithm, same edge cases),
-so it is the oracle for the fixtures. The page's own JavaScript is not executed here:
-these tests have no node or browser dependency.
+so it is the oracle for the fixtures. These tests need no node or browser; the page's
+own parser is run against the same fixtures in test_page_behaviour.py.
 """
 
 import codecs
