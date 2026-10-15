@@ -1,0 +1,32 @@
+# Local hooks run the tool versions pinned in uv.lock, so pre-commit and `make lint`
+# can never disagree.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # The author's own files are kept byte-for-byte.
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: check-yaml
+      - id: end-of-file-fixer
+        exclude: ^(CLAUDE|PLAN)\.md$
+      - id: trailing-whitespace
+        exclude: ^(CLAUDE|PLAN)\.md$

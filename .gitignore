@@ -1,0 +1,25 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime data (WAL mode also writes *.sqlite-wal / *.sqlite-shm)
+*.sqlite*
+data/
+traces/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# os / editors
+.DS_Store
+.idea/
+.vscode/
