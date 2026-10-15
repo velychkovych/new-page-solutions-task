@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from helpdesk.shared.errors import ErrorCode, format_tool_error
 from helpdesk.shared.tickets import ApiError
+from helpdesk.shared.tools import WRITE_TOOLS
 
 # A write that timed out may still have committed, so the model must not claim either
 # outcome, and must not make up a ticket id.
@@ -112,4 +113,14 @@ def malformed_response(status: int, next_step: str | None = None) -> ToolCallErr
         ErrorCode.UPSTREAM_UNAVAILABLE,
         f"The ticketing system returned a malformed response (HTTP {status})",
         next_step,
+    )
+
+
+def unexpected_failure(tool: str) -> ToolCallError:
+    """A failure no other mapping covers. The exception text is left out: it may come from
+    upstream bytes. A write may still have committed, so it is reported as unconfirmed."""
+    return ToolCallError(
+        ErrorCode.UPSTREAM_UNAVAILABLE,
+        "The tool failed with an unexpected error",
+        WRITE_NOT_CONFIRMED_NEXT_STEP if tool in WRITE_TOOLS else None,
     )

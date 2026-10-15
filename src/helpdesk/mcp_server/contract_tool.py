@@ -23,7 +23,7 @@ from mcp.types import CallToolResult, TextContent
 from opentelemetry.trace import Span, Status, StatusCode, Tracer
 from pydantic import BaseModel, ValidationError, create_model
 
-from helpdesk.mcp_server.errors import ToolCallError, invalid_arguments
+from helpdesk.mcp_server.errors import ToolCallError, invalid_arguments, unexpected_failure
 from helpdesk.mcp_server.redaction import SecretRedactor, truncate_utf8
 from helpdesk.mcp_server.retry import OnRetry
 from helpdesk.shared import trace_attributes as attr
@@ -117,6 +117,11 @@ class ToolRunner[A: BaseModel]:
             value = await self._handler(args, retry_progress(context))
         except ToolCallError as exc:
             return self._fail(span, exc)
+        except Exception as exc:
+            # Last resort. Without it the low-level server returns str(exc) as the tool
+            # text, which breaks the error contract and may carry upstream bytes.
+            logger.error("tool %s failed unexpectedly: %s", self.name, type(exc).__name__)
+            return self._fail(span, unexpected_failure(self.name))
         text = self._redact(value.model_dump_json())
         span.set_attribute(attr.TOOL_RESULT, truncate_utf8(text, self._result_max_bytes))
         return text_result(text, is_error=False)

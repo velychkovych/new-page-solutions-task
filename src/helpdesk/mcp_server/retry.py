@@ -82,7 +82,7 @@ class DeadlineExceededError(UpstreamCallError):
 
 
 class UpstreamUnavailableError(UpstreamCallError):
-    """Attempts ran out before the deadline, or a non-retryable transport error (maps to
+    """Attempts ran out before the deadline, or a non-retryable httpx error (maps to
     UPSTREAM_UNAVAILABLE)."""
 
 
@@ -155,10 +155,12 @@ async def call_with_retry(
                 response = await send(timeout_s)
         except _RETRYABLE_ERRORS as exc:
             logger.debug("attempt %d failed: %s", attempt, type(exc).__name__)
-        except httpx.TransportError as exc:
+        except httpx.HTTPError as exc:
+            # Any other httpx failure (protocol error, bad Content-Encoding, redirect loop)
+            # will not get better on retry.
             _record_attempt(attempt, None, 0.0)
             raise UpstreamUnavailableError(
-                f"transport error: {type(exc).__name__}", attempts=attempt, last_status=None
+                f"HTTP error: {type(exc).__name__}", attempts=attempt, last_status=None
             ) from exc
 
         status = None if response is None else response.status_code

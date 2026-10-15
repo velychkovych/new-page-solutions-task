@@ -84,6 +84,20 @@ async def test_error_call_span(
     assert span.status.status_code is StatusCode.ERROR
 
 
+async def test_unexpected_failure_span_has_error_code(
+    mcp_session: SessionFactory, mock_api: respx.Router, span_exporter: InMemorySpanExporter
+) -> None:
+    mock_api.get("/tickets/INC-0003").mock(side_effect=RuntimeError("RAW-UPSTREAM"))
+    async with mcp_session() as session:
+        await session.call_tool("get_ticket", {"ticket_id": "INC-0003"})
+
+    span = only_tool_span(span_exporter)
+    attributes = dict(span.attributes or {})
+    assert attributes[attr.TOOL_ERROR_CODE] == "UPSTREAM_UNAVAILABLE"
+    assert "RAW-UPSTREAM" not in str(attributes[attr.TOOL_RESULT])
+    assert span.status.status_code is StatusCode.ERROR
+
+
 async def test_invalid_arguments_span_has_zero_attempts(
     mcp_session: SessionFactory, span_exporter: InMemorySpanExporter
 ) -> None:

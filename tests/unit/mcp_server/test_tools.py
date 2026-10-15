@@ -480,6 +480,54 @@ async def test_malformed_success_body_is_unavailable_and_not_echoed(
     assert "RAW-UPSTREAM-BODY" not in text_of(result)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [httpx.DecodingError("bad gzip RAW-UPSTREAM-BYTES"), httpx.TooManyRedirects("RAW-UPSTREAM")],
+    ids=["decoding-error", "too-many-redirects"],
+)
+@pytest.mark.parametrize("write", [False, True], ids=["read", "write"])
+async def test_other_http_errors_are_unavailable_without_retry(
+    error: Exception, write: bool, mcp_session: SessionFactory, mock_api: respx.Router
+) -> None:
+    route = (mock_api.post("/tickets") if write else mock_api.get("/tickets/INC-0003")).mock(
+        side_effect=error
+    )
+    async with mcp_session() as session:
+        if write:
+            result = await session.call_tool("create_ticket", CREATE_ARGS)
+        else:
+            result = await session.call_tool("get_ticket", {"ticket_id": "INC-0003"})
+    assert_error(result, unavailable(write=write, attempts=1))
+    assert "RAW-UPSTREAM" not in text_of(result)
+    assert route.call_count == 1
+
+
+@pytest.mark.parametrize("write", [False, True], ids=["read", "write"])
+async def test_unexpected_exception_still_gives_contract_text(
+    write: bool, mcp_session: SessionFactory, mock_api: respx.Router
+) -> None:
+    """Without a fallback, FastMCP's low-level server would return str(exc) as the text."""
+    boom = RuntimeError(f"RAW-UPSTREAM-BODY Bearer {TOKEN}")
+    (mock_api.post("/tickets") if write else mock_api.get("/tickets/INC-0003")).mock(
+        side_effect=boom
+    )
+    async with mcp_session() as session:
+        if write:
+            result = await session.call_tool("create_ticket", CREATE_ARGS)
+        else:
+            result = await session.call_tool("get_ticket", {"ticket_id": "INC-0003"})
+    assert_error(
+        result,
+        format_tool_error(
+            ErrorCode.UPSTREAM_UNAVAILABLE,
+            "The tool failed with an unexpected error",
+            WRITE_NOT_CONFIRMED_NEXT_STEP if write else None,
+        ),
+    )
+    assert "RAW-UPSTREAM" not in text_of(result)
+    assert TOKEN not in text_of(result)
+
+
 # --- argument validation through FastMCP -----------------------------------------------
 
 

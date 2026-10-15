@@ -198,6 +198,21 @@ async def test_other_transport_errors_are_not_retried(
     assert len(send.timeouts) == 1
 
 
+@pytest.mark.parametrize(
+    "error",
+    [httpx.DecodingError("bad gzip"), httpx.TooManyRedirects("loop")],
+    ids=["decoding-error", "too-many-redirects"],
+)
+async def test_non_transport_http_errors_are_unavailable_without_retry(
+    error: Exception, clock: FakeClock, uniform: RecordingUniform
+) -> None:
+    send = ScriptedSend(clock, [error, response(200)])
+    with pytest.raises(UpstreamUnavailableError) as caught:
+        await run(send, clock, uniform)
+    assert caught.value.attempts == 1
+    assert len(send.timeouts) == 1
+
+
 async def test_per_attempt_timeout_is_enforced(clock: FakeClock, uniform: RecordingUniform) -> None:
     policy = POLICY.model_copy(update={"attempt_timeout_s": 0.01})
     calls = 0
