@@ -111,6 +111,8 @@ def setup_telemetry(service_name: str, settings: Settings | None = None) -> Tele
     Safe to call again with the same name (returns the active setup). The OTel API lets
     the global provider be set only once per process, so setup after shutdown, or over a
     provider someone else installed, raises instead of silently tracing into nothing.
+    Pair it with `shutdown_telemetry()` in the process entry point, not in an app
+    lifespan that may start several times in one process (tests).
     """
     with _state.lock:
         if _state.active is not None:
@@ -124,7 +126,10 @@ def setup_telemetry(service_name: str, settings: Settings | None = None) -> Tele
         trace.set_tracer_provider(telemetry.provider)
         if trace.get_tracer_provider() is not telemetry.provider:
             telemetry.provider.shutdown()
-            raise TelemetryConfigError("a global tracer provider is already installed")
+            raise TelemetryConfigError(
+                "a global tracer provider is already installed: setup_telemetry() works once"
+                " per process, so call it from the entry point, not from an app lifespan"
+            )
 
         for instrumentor in _instrumentors():
             if not instrumentor.is_instrumented_by_opentelemetry:

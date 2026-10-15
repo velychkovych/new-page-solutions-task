@@ -147,7 +147,7 @@ def test_setup_refuses_when_another_global_provider_exists(make_settings: Any) -
     setup_telemetry("agent", settings)
     shutdown_telemetry()
     # The OTel API cannot replace the global provider, so a second setup must not pretend.
-    with pytest.raises(TelemetryConfigError, match="already installed"):
+    with pytest.raises(TelemetryConfigError, match=r"already installed.*from the entry point"):
         setup_telemetry("agent", settings)
 
 
