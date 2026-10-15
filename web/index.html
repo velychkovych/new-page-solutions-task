@@ -1,0 +1,788 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Defence in depth: everything rendered is untrusted (ticket text can carry prompt
+     injection or HTML), so the page loads nothing external and talks only to its origin. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<!-- Jaeger UI base URL for trace links. Empty = no link. The agent can fill this from
+     Settings.jaeger_ui_url when it serves the page; ?jaeger=<url> overrides it. -->
+<meta name="helpdesk-jaeger-ui-url" content="">
+<link rel="icon" href="data:,">
+<title>IT Helpdesk</title>
+<style>
+  :root {
+    --fg: #1d1d1f; --muted: #5f6368; --bg: #ffffff; --panel: #f5f6f7; --line: #d6d8db;
+    --user: #e7f0fe; --error: #b3261e; --error-bg: #fdecea; --wait: #8a5a00; --wait-bg: #fff4d6;
+    --ok: #1e6b34;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  header, #status-bar, main { padding: 8px 16px; }
+  header { border-bottom: 1px solid var(--line); }
+  h1 { font-size: 18px; margin: 0 0 6px; }
+  h2 { font-size: 15px; margin: 0 0 6px; }
+  h3 { font-size: 13px; margin: 0 0 4px; color: var(--muted); font-weight: 600; }
+  label { font-size: 13px; color: var(--muted); }
+  input, textarea, button { font: inherit; }
+  input { width: 18ch; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; }
+  input[aria-invalid="true"] { border-color: var(--error); }
+  button { padding: 4px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  pre, code { font: 12px/1.4 ui-monospace, monospace; }
+  pre { margin: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel); padding: 4px 6px; border-radius: 4px; }
+  ol { list-style: none; margin: 0; padding: 0; }
+  #identity { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; }
+  #identity-error, .error-text { color: var(--error); }
+  #fixture-banner { margin: 6px 0 0; font-size: 13px; color: var(--wait); }
+  #status-bar { display: flex; flex-wrap: wrap; gap: 4px 16px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+  #status-line { margin: 0; flex: 1 1 24ch; }
+  #status-line[data-kind="error"] { color: var(--error); }
+  #status-line[data-kind="waiting"] { color: var(--wait); }
+  #trace { margin: 0; }
+  main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; }
+  @media (max-width: 800px) { main { grid-template-columns: minmax(0, 1fr); } }
+  #messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .msg { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); }
+  .msg-user { background: var(--user); align-self: flex-end; max-width: 85%; }
+  .msg-assistant { background: var(--bg); }
+  .msg-tool { background: var(--panel); font-size: 13px; }
+  .msg.has-error { border-color: var(--error); background: var(--error-bg); }
+  .role { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .meta { font-size: 12px; color: var(--muted); }
+  .meta:empty { display: none; }
+  #pending { border: 1px solid var(--wait); background: var(--wait-bg); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; }
+  #pending-summary { margin: 0 0 4px; overflow-wrap: anywhere; }
+  .actions { display: flex; gap: 8px; margin-top: 6px; }
+  #composer { display: grid; gap: 4px; }
+  #message { width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 4px; resize: vertical; }
+  .composer-row { display: flex; gap: 8px; align-items: center; }
+  .hint { font-size: 12px; color: var(--muted); }
+  #timeline { display: flex; flex-direction: column; gap: 10px; }
+  .turn { border-top: 1px solid var(--line); padding-top: 6px; }
+  .calls { display: flex; flex-direction: column; gap: 6px; }
+  .call { border-left: 3px solid var(--line); padding-left: 8px; }
+  .call.ok { border-left-color: var(--ok); }
+  .call.failed { border-left-color: var(--error); }
+  .call-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+  .call-id, .latency, .label { font-size: 11px; color: var(--muted); }
+  .note { font-size: 12px; color: var(--wait); font-style: italic; }
+  .empty { font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>IT Helpdesk</h1>
+  <form id="identity" novalidate>
+    <label>User id<br>
+      <input id="user-id" name="user_id" autocomplete="off" spellcheck="false" required
+             maxlength="64" pattern="[a-zA-Z0-9_\-]{1,64}" placeholder="alice">
+    </label>
+    <label>Session id<br>
+      <input id="session-id" name="session_id" autocomplete="off" spellcheck="false" required
+             maxlength="64" pattern="[a-zA-Z0-9_\-]{1,64}">
+    </label>
+    <button id="new-session" type="button">New session</button>
+    <span id="identity-error" aria-live="polite"></span>
+  </form>
+  <p id="fixture-banner" hidden></p>
+</header>
+
+<div id="status-bar">
+  <p id="status-line" role="status" aria-live="polite">Loading…</p>
+  <p id="trace">Last trace: <span id="trace-id">none yet</span></p>
+</div>
+
+<main>
+  <section id="chat-panel" aria-label="Chat">
+    <ol id="messages" aria-label="Conversation"></ol>
+
+    <div id="pending" hidden>
+      <h2>Awaiting your approval</h2>
+      <p id="pending-summary"></p>
+      <div class="label">Tool <code id="pending-tool"></code></div>
+      <pre id="pending-args"></pre>
+      <div class="actions">
+        <button id="approve" type="button" disabled>Approve</button>
+        <button id="decline" type="button" disabled>Decline</button>
+      </div>
+    </div>
+
+    <form id="composer" novalidate>
+      <label for="message">Message</label>
+      <textarea id="message" name="message" rows="3" maxlength="4000"
+                placeholder="Describe your IT problem…"></textarea>
+      <div class="composer-row">
+        <button id="send" type="submit">Send</button>
+        <span class="hint">Ctrl/Cmd+Enter sends. While a change is pending you can also type
+          "approve" or "decline".</span>
+      </div>
+    </form>
+  </section>
+
+  <section id="timeline-panel" aria-label="Tool calls">
+    <h2>Tool calls</h2>
+    <ol id="timeline"></ol>
+  </section>
+</main>
+
+<!-- Kept in its own script block so the parser can be exercised on its own. -->
+<script id="sse-parser">
+"use strict";
+/**
+ * Incremental Server-Sent Events parser (WHATWG "event stream" rules, minus id/retry,
+ * which this app does not use). Feed it decoded text in chunks of any size: a frame,
+ * a line, or a "\r\n" pair may be split across chunks. Comment lines (": ping") are
+ * ignored. onEvent(name, data) is called once per complete frame that carried data.
+ */
+function createSseParser(onEvent) {
+  let buffer = "";
+  let eventName = "";
+  let dataLines = [];
+
+  function dispatch() {
+    const name = eventName || "message";
+    eventName = "";
+    if (dataLines.length === 0) return;
+    const data = dataLines.join("\n");
+    dataLines = [];
+    onEvent(name, data);
+  }
+
+  function processLine(line) {
+    if (line === "") { dispatch(); return; }
+    if (line[0] === ":") return;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let value = colon === -1 ? "" : line.slice(colon + 1);
+    if (value[0] === " ") value = value.slice(1);
+    if (field === "event") eventName = value;
+    else if (field === "data") dataLines.push(value);
+  }
+
+  return {
+    push(text) {
+      buffer += text;
+      let start = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        const ch = buffer[i];
+        if (ch !== "\n" && ch !== "\r") continue;
+        // A trailing "\r" may be the first half of "\r\n": wait for the next chunk.
+        if (ch === "\r" && i + 1 === buffer.length) break;
+        processLine(buffer.slice(start, i));
+        if (ch === "\r" && buffer[i + 1] === "\n") i++;
+        start = i + 1;
+      }
+      buffer = buffer.slice(start);
+    },
+    end() {
+      if (buffer.endsWith("\r")) processLine(buffer.slice(0, -1));
+      // The spec discards a frame that was not terminated by a blank line.
+      buffer = "";
+      eventName = "";
+      dataLines = [];
+    },
+  };
+}
+</script>
+
+<script id="app">
+"use strict";
+(() => {
+  // Same rule as the server (shared.ids.PRINCIPAL_ID_PATTERN), so ids never collide.
+  const ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+  const TRACE_RE = /^[0-9a-f]{32}$/;
+  // Fixture names map to files under fixtures/; the pattern rules out path tricks.
+  const FIXTURE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+  const MESSAGE_MAX = 4000;
+  const STORAGE_KEY = "helpdesk.identity";
+  const FIXTURE_CHUNK_SIZES = [1, 7, 2, 13, 3, 31, 5, 64];
+  const FIXTURE_CHUNK_DELAY_MS = 8;
+
+  const $ = (id) => document.getElementById(id);
+  const ui = {
+    identity: $("identity"), userId: $("user-id"), sessionId: $("session-id"),
+    newSession: $("new-session"), identityError: $("identity-error"),
+    fixtureBanner: $("fixture-banner"), status: $("status-line"), traceId: $("trace-id"),
+    messages: $("messages"), pending: $("pending"), pendingSummary: $("pending-summary"),
+    pendingTool: $("pending-tool"), pendingArgs: $("pending-args"),
+    approve: $("approve"), decline: $("decline"),
+    composer: $("composer"), message: $("message"), send: $("send"), timeline: $("timeline"),
+  };
+
+  const params = new URLSearchParams(location.search);
+  const fixture = fixtureName(params.get("fixture"));
+  const fixtureSession = fixture ? fixtureName(params.get("fixture_session")) : null;
+  const jaegerMeta = document.querySelector('meta[name="helpdesk-jaeger-ui-url"]');
+  const jaegerBase = httpBase(params.get("jaeger") ?? (jaegerMeta ? jaegerMeta.content : ""));
+
+  let busy = false;
+  let pendingAction = null;
+  let turnCount = 0;
+
+  // --- small helpers -----------------------------------------------------------
+
+  // Every string child becomes a Text node, so server, model and ticket text is never
+  // parsed as HTML.
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, value);
+    for (const child of children) if (child !== null && child !== undefined) node.append(child);
+    return node;
+  }
+
+  function text(value) {
+    return value === null || value === undefined ? "" : String(value);
+  }
+
+  function pretty(value) {
+    if (value === undefined) return "";
+    try { return JSON.stringify(value, null, 2); } catch { return text(value); }
+  }
+
+  function describe(err) {
+    return err instanceof Error ? err.message : text(err);
+  }
+
+  function fixtureName(raw) {
+    return raw && FIXTURE_RE.test(raw) ? raw : null;
+  }
+
+  // Only http(s) bases are accepted, so a crafted value cannot become a javascript: link.
+  function httpBase(raw) {
+    const value = text(raw).trim();
+    if (!value) return "";
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+      return url.href.replace(/\/+$/, "");
+    } catch {
+      return "";
+    }
+  }
+
+  function setStatus(message, kind = "info") {
+    ui.status.textContent = message;
+    ui.status.dataset.kind = kind;
+  }
+
+  function scrollToEnd() {
+    ui.messages.lastElementChild?.scrollIntoView({ block: "nearest" });
+  }
+
+  // --- identity ----------------------------------------------------------------
+
+  function newSessionId() {
+    // getRandomValues works on plain http too (crypto.randomUUID needs a secure context).
+    const bytes = new Uint8Array(12);
+    crypto.getRandomValues(bytes);
+    return "s-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  function readIdentity() {
+    const userId = ui.userId.value.trim();
+    const sessionId = ui.sessionId.value.trim();
+    const problems = [];
+    const userOk = ID_RE.test(userId);
+    const sessionOk = ID_RE.test(sessionId);
+    ui.userId.setAttribute("aria-invalid", String(!userOk));
+    ui.sessionId.setAttribute("aria-invalid", String(!sessionOk));
+    if (!userOk) problems.push("User id: 1-64 letters, digits, '_' or '-'.");
+    if (!sessionOk) problems.push("Session id: 1-64 letters, digits, '_' or '-'.");
+    ui.identityError.textContent = problems.join(" ");
+    if (problems.length) return null;
+    ui.userId.value = userId;
+    ui.sessionId.value = sessionId;
+    return { userId, sessionId };
+  }
+
+  function loadSavedIdentity() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      return saved && typeof saved === "object" ? saved : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveIdentity(identity) {
+    if (fixture) return;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(identity)); } catch { /* optional */ }
+  }
+
+  // --- controls ----------------------------------------------------------------
+
+  function syncControls() {
+    const canDecide = !busy && pendingAction !== null;
+    ui.approve.disabled = !canDecide;
+    ui.decline.disabled = !canDecide;
+    ui.send.disabled = busy;
+    ui.newSession.disabled = busy;
+    ui.userId.disabled = busy;
+    ui.sessionId.disabled = busy;
+  }
+
+  function setBusy(value) {
+    busy = value;
+    document.body.setAttribute("aria-busy", String(value));
+    syncControls();
+  }
+
+  function setPending(action) {
+    pendingAction = action && typeof action === "object" && typeof action.action_id === "string"
+      ? action : null;
+    ui.pending.hidden = pendingAction === null;
+    ui.pendingSummary.textContent = pendingAction ? text(pendingAction.summary) : "";
+    ui.pendingTool.textContent = pendingAction ? text(pendingAction.tool) : "";
+    ui.pendingArgs.textContent = pendingAction ? pretty(pendingAction.args) : "";
+    syncControls();
+  }
+
+  // --- rendering -----------------------------------------------------------------
+
+  const ROLES = new Set(["user", "assistant", "tool"]);
+
+  function appendMessage(role, content, toolName) {
+    const safeRole = ROLES.has(role) ? role : "other";
+    const body = el("div", { class: "body" }, content);
+    const meta = el("div", { class: "meta" });
+    let shown = body;
+    if (safeRole === "tool") {
+      const preview = content.length > 120 ? content.slice(0, 120) + "…" : content;
+      shown = el("details", {}, el("summary", {}, preview), body);
+    }
+    const label = safeRole === "tool" && toolName ? `tool: ${toolName}` : safeRole;
+    const item = el("li", { class: `msg msg-${safeRole}` }, el("div", { class: "role" }, label), shown, meta);
+    ui.messages.append(item);
+    scrollToEnd();
+    return { item, body, meta };
+  }
+
+  function startTurn(userLabel) {
+    turnCount += 1;
+    if (userLabel) appendMessage("user", userLabel);
+    const bubble = appendMessage("assistant", "");
+    const header = el("h3", {}, `Turn ${turnCount}`);
+    const calls = el("ol", { class: "calls" });
+    ui.timeline.querySelector(".empty")?.remove();
+    ui.timeline.append(el("li", { class: "turn" }, header, calls));
+    return {
+      bubble, header, calls, rows: new Map(), reply: "", pending: null, error: null,
+      done: false, needsReload: false,
+    };
+  }
+
+  function appendReply(turn, chunk) {
+    turn.reply += chunk;
+    turn.bubble.body.textContent = turn.reply;
+    scrollToEnd();
+  }
+
+  // The reply text already says what went wrong; only mark the bubble.
+  function markError(turn, message) {
+    turn.error = message;
+    turn.bubble.item.classList.add("has-error");
+    setStatus(message, "error");
+  }
+
+  function showTurnError(turn, message) {
+    markError(turn, message);
+    turn.bubble.meta.append(el("div", { class: "error-text" }, message));
+  }
+
+  function failTurn(turn, message) {
+    showTurnError(turn, message);
+    turn.done = true;
+  }
+
+  function addNote(turn, message) {
+    turn.calls.append(el("li", { class: "note" }, message));
+  }
+
+  function addToolRow(turn, callId, name, args) {
+    const latency = el("span", { class: "latency" }, "running…");
+    const result = el("pre", { class: "result" }, "");
+    const error = el("pre", { class: "error-text" });
+    error.hidden = true;
+    const row = el("li", { class: "call running" },
+      el("div", { class: "call-head" }, el("strong", {}, name), el("code", { class: "call-id" }, callId), latency),
+      el("div", { class: "label" }, "args"), el("pre", { class: "args" }, pretty(args)),
+      el("div", { class: "label" }, "result"), result, error);
+    turn.calls.append(row);
+    const entry = { row, latency, result, error };
+    turn.rows.set(callId, entry);
+    return entry;
+  }
+
+  function finishToolRow(entry, data) {
+    const failed = typeof data.error === "string" && data.error !== "";
+    entry.row.classList.remove("running");
+    entry.row.classList.add(failed ? "failed" : "ok");
+    entry.latency.textContent = Number.isFinite(data.latency_ms) ? `${data.latency_ms} ms` : "";
+    const summary = text(data.result_summary);
+    // A failed call's summary is usually the start of the error text; show it once.
+    const repeatsError = failed && summary !== "" && data.error.startsWith(summary);
+    entry.result.textContent = repeatsError ? "(failed, see error)" : summary || "(no result)";
+    if (failed) {
+      entry.error.textContent = data.error;
+      entry.error.hidden = false;
+    }
+  }
+
+  function traceNodes(traceId) {
+    const nodes = [el("code", {}, traceId)];
+    if (jaegerBase) {
+      nodes.push(" ", el("a", {
+        href: `${jaegerBase}/trace/${traceId}`, target: "_blank", rel: "noopener noreferrer",
+      }, "open in Jaeger"));
+    }
+    return nodes;
+  }
+
+  function showTrace(turn, traceId) {
+    if (!TRACE_RE.test(traceId)) return;
+    turn.bubble.meta.prepend(el("div", { class: "trace" }, "trace ", ...traceNodes(traceId)));
+    turn.header.append(" · ", ...traceNodes(traceId));
+    ui.traceId.replaceChildren(...traceNodes(traceId));
+  }
+
+  function finishTurn(turn, status, traceId, pending) {
+    turn.done = true;
+    showTrace(turn, text(traceId));
+    if (!turn.reply && !turn.error) turn.bubble.body.textContent = "(no reply text)";
+    if (status === "awaiting_approval") {
+      if (pending) {
+        setPending(pending);
+        setStatus(`Awaiting approval: ${text(pending.summary)}`, "waiting");
+      } else {
+        // Contract breach (no approval_required); the session view is authoritative.
+        turn.needsReload = true;
+      }
+      return;
+    }
+    setPending(null);
+    if (status === "error") {
+      if (!turn.error) markError(turn, turn.reply || "The request failed.");
+      setStatus(turn.error, "error");
+    } else {
+      setStatus("Done.");
+    }
+  }
+
+  function renderSession(view) {
+    ui.messages.replaceChildren();
+    ui.timeline.replaceChildren(el("li", { class: "empty" }, "Tool calls of new turns appear here."));
+    turnCount = 0;
+    const messages = Array.isArray(view.messages) ? view.messages : [];
+    for (const message of messages) {
+      const content = text(message && message.content);
+      if (message && message.role === "assistant" && content === "") continue;
+      appendMessage(text(message && message.role), content, text(message && message.tool_name));
+    }
+    setPending(view.pending_action || null);
+    if (pendingAction) setStatus(`Awaiting approval: ${text(pendingAction.summary)}`, "waiting");
+    else setStatus(messages.length ? `Session loaded (${messages.length} messages).` : "New session.");
+  }
+
+  // --- network -----------------------------------------------------------------
+
+  function jsonHeaders(accept) {
+    return { "content-type": "application/json", accept };
+  }
+
+  async function apiFetch(path, init) {
+    return fixture ? fixtureFetch(path, init) : fetch(path, init);
+  }
+
+  async function validationMessage(resp) {
+    try {
+      const body = await resp.json();
+      if (Array.isArray(body.detail)) {
+        return "The request was rejected: " + body.detail.map((d) => text(d && d.msg)).join("; ");
+      }
+      if (body.detail) return "The request was rejected: " + text(body.detail);
+    } catch { /* fall through */ }
+    return "The request was rejected (HTTP 422).";
+  }
+
+  async function loadSession(identity) {
+    const path = `/sessions/${encodeURIComponent(identity.userId)}/${encodeURIComponent(identity.sessionId)}`;
+    try {
+      const resp = await apiFetch(path, { headers: { accept: "application/json" } });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      renderSession(await resp.json());
+    } catch (err) {
+      setStatus(`Could not load the session: ${describe(err)}`, "error");
+    }
+  }
+
+  async function reloadSession() {
+    if (busy) return;
+    const identity = readIdentity();
+    if (!identity) {
+      setStatus("Enter a valid user id and session id.", "error");
+      return;
+    }
+    saveIdentity(identity);
+    setBusy(true);
+    try { await loadSession(identity); } finally { setBusy(false); }
+  }
+
+  function handleEvent(turn, name, raw) {
+    if (turn.done) return; // done is the last event; anything after it is ignored
+    let data;
+    try { data = JSON.parse(raw); } catch { data = null; }
+    if (data === null || typeof data !== "object") {
+      addNote(turn, `Ignored a malformed "${name}" event.`);
+      return;
+    }
+    switch (name) {
+      case "token":
+        appendReply(turn, text(data.text));
+        break;
+      case "tool_start":
+        addToolRow(turn, text(data.call_id), text(data.name) || "(unknown tool)", data.args);
+        setStatus(`Running ${text(data.name)}…`);
+        break;
+      case "tool_end": {
+        const callId = text(data.call_id);
+        const entry = turn.rows.get(callId) || addToolRow(turn, callId, "(unknown tool)", undefined);
+        finishToolRow(entry, data);
+        break;
+      }
+      case "status":
+        setStatus(text(data.message));
+        addNote(turn, text(data.message));
+        break;
+      case "approval_required":
+        turn.pending = data;
+        break;
+      case "error":
+        showTurnError(turn, text(data.message) || "Something went wrong.");
+        break;
+      case "done":
+        finishTurn(turn, data.status, data.trace_id, turn.pending);
+        break;
+      default:
+        break; // unknown events are ignored, so the server can add events later
+    }
+  }
+
+  // Returns "unavailable" only when nothing was streamed, so the caller may use /chat.
+  async function streamTurn(body, turn) {
+    let resp;
+    try {
+      resp = await apiFetch("/chat/stream", {
+        method: "POST", headers: jsonHeaders("text/event-stream"), body: JSON.stringify(body),
+      });
+    } catch {
+      return "unavailable";
+    }
+    if (resp.status === 404 || resp.status === 405 || resp.status === 501) return "unavailable";
+    if (resp.status === 422) {
+      failTurn(turn, await validationMessage(resp));
+      return "handled";
+    }
+    if (!resp.ok) {
+      // The server may have acted on the request, so it is never re-sent.
+      failTurn(turn, `The agent returned HTTP ${resp.status}.`);
+      turn.needsReload = true;
+      return "handled";
+    }
+    const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.startsWith("text/event-stream") || !resp.body) {
+      try { await resp.body?.cancel(); } catch { /* already closed */ }
+      return "unavailable";
+    }
+
+    // From here on the stream has started: never re-send this request, it may carry a decision.
+    setStatus("Streaming…");
+    const parser = createSseParser((name, data) => handleEvent(turn, name, data));
+    const decoder = new TextDecoder();
+    const reader = resp.body.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        parser.push(decoder.decode(value, { stream: true }));
+      }
+      parser.push(decoder.decode());
+      parser.end();
+    } catch (err) {
+      if (!turn.done) addNote(turn, `Stream interrupted: ${describe(err)}`);
+    }
+    if (!turn.done) {
+      failTurn(turn, "The connection closed before the turn finished. Reloading the session.");
+      turn.needsReload = true;
+    }
+    return "handled";
+  }
+
+  async function postTurn(body, turn) {
+    let resp;
+    try {
+      resp = await apiFetch("/chat", {
+        method: "POST", headers: jsonHeaders("application/json"), body: JSON.stringify(body),
+      });
+    } catch (err) {
+      failTurn(turn, `Could not reach the agent: ${describe(err)}`);
+      return;
+    }
+    if (resp.status === 422) {
+      failTurn(turn, await validationMessage(resp));
+      return;
+    }
+    if (!resp.ok) {
+      failTurn(turn, `The agent returned HTTP ${resp.status}.`);
+      turn.needsReload = true;
+      return;
+    }
+    let data;
+    try { data = await resp.json(); } catch { data = null; }
+    if (data === null || typeof data !== "object") {
+      failTurn(turn, "The agent returned a response that is not JSON.");
+      turn.needsReload = true;
+      return;
+    }
+    const calls = Array.isArray(data.tool_calls) ? data.tool_calls : [];
+    calls.forEach((call, index) => {
+      const entry = addToolRow(turn, `#${index + 1}`, text(call && call.name) || "(unknown tool)", call && call.args);
+      finishToolRow(entry, call || {});
+    });
+    appendReply(turn, text(data.reply));
+    if (data.status === "error") markError(turn, text(data.reply) || "The request failed.");
+    finishTurn(turn, data.status, data.trace_id, data.status === "awaiting_approval" ? data.pending_action : null);
+  }
+
+  async function runTurn(input, userLabel) {
+    // The guard matters even with disabled buttons: a fast double click can fire twice
+    // before the browser repaints.
+    if (busy) return;
+    const identity = readIdentity();
+    if (!identity) {
+      setStatus("Enter a valid user id and session id first.", "error");
+      return;
+    }
+    saveIdentity(identity);
+    const body = { user_id: identity.userId, session_id: identity.sessionId, ...input };
+    setBusy(true);
+    const turn = startTurn(userLabel);
+    setStatus("Sending…");
+    try {
+      const outcome = await streamTurn(body, turn);
+      if (outcome === "unavailable") {
+        addNote(turn, "Streaming is unavailable; used POST /chat instead.");
+        await postTurn(body, turn);
+      }
+      if (turn.needsReload) await loadSession(identity);
+    } catch (err) {
+      failTurn(turn, `Unexpected client error: ${describe(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // --- fixture mode ------------------------------------------------------------
+  // ?fixture=<name> replaces the network with files under fixtures/, replayed in odd-sized
+  // chunks through the same parser and renderer. Messages replay <name>.sse (or, when that
+  // file is missing, fall back to <name>.json as a /chat response, exercising the real
+  // fallback path); Approve replays approve.sse and Decline replays decline.sse.
+  // ?fixture_session=<name> serves fixtures/<name>.json as the session view.
+
+  function chunkedStream(bytes) {
+    let offset = 0;
+    let index = 0;
+    return new ReadableStream({
+      async pull(controller) {
+        if (offset >= bytes.length) { controller.close(); return; }
+        await new Promise((resolve) => setTimeout(resolve, FIXTURE_CHUNK_DELAY_MS));
+        const size = FIXTURE_CHUNK_SIZES[index++ % FIXTURE_CHUNK_SIZES.length];
+        controller.enqueue(bytes.slice(offset, offset + size));
+        offset += size;
+      },
+    });
+  }
+
+  async function fixtureFile(file, contentType) {
+    const resp = await fetch(new URL(`fixtures/${file}`, document.baseURI), { cache: "no-store" });
+    if (!resp.ok) return new Response(null, { status: 404 });
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    // Only streams are chunked: that is where split frames matter.
+    const isStream = contentType === "text/event-stream";
+    const body = isStream ? chunkedStream(bytes) : bytes;
+    return new Response(body, { status: 200, headers: { "content-type": contentType } });
+  }
+
+  async function fixtureFetch(path, init) {
+    if (path.startsWith("/sessions/")) {
+      if (fixtureSession) return fixtureFile(`${fixtureSession}.json`, "application/json");
+      return new Response('{"messages":[]}', { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const request = JSON.parse(init.body);
+    const name = request.decision ? (request.decision.approve ? "approve" : "decline") : fixture;
+    if (path === "/chat/stream") return fixtureFile(`${name}.sse`, "text/event-stream");
+    if (path === "/chat") return fixtureFile(`${name}.json`, "application/json");
+    return new Response(null, { status: 404 });
+  }
+
+  // --- wiring ------------------------------------------------------------------
+
+  ui.identity.addEventListener("submit", (event) => event.preventDefault());
+  for (const input of [ui.userId, ui.sessionId]) input.addEventListener("change", reloadSession);
+
+  ui.newSession.addEventListener("click", () => {
+    ui.sessionId.value = newSessionId();
+    reloadSession();
+  });
+
+  ui.composer.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const message = ui.message.value.trim();
+    if (!message) { setStatus("Type a message first.", "error"); return; }
+    if (message.length > MESSAGE_MAX) { setStatus(`Messages are limited to ${MESSAGE_MAX} characters.`, "error"); return; }
+    if (busy) return;
+    ui.message.value = "";
+    runTurn({ message }, message);
+  });
+
+  ui.message.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      ui.composer.requestSubmit();
+    }
+  });
+
+  function decide(approve) {
+    if (busy || !pendingAction) return;
+    const action = pendingAction;
+    const label = `${approve ? "Approve" : "Decline"}: ${text(action.summary)}`;
+    runTurn({ decision: { action_id: action.action_id, approve } }, label);
+  }
+  ui.approve.addEventListener("click", () => decide(true));
+  ui.decline.addEventListener("click", () => decide(false));
+
+  async function init() {
+    const saved = fixture ? { userId: "alice", sessionId: "fixture-demo" } : loadSavedIdentity();
+    ui.userId.value = saved && ID_RE.test(text(saved.userId)) ? saved.userId : "";
+    ui.sessionId.value = saved && ID_RE.test(text(saved.sessionId)) ? saved.sessionId : newSessionId();
+    if (fixture) {
+      ui.fixtureBanner.textContent = `Fixture mode: replaying fixtures/${fixture}.sse. Nothing is sent to the agent.`;
+      ui.fixtureBanner.hidden = false;
+    }
+    syncControls();
+    if (!ui.userId.value) {
+      setStatus("Enter your user id to start.");
+      ui.userId.focus();
+      return;
+    }
+    await reloadSession();
+    if (fixture) await runTurn({ message: `fixture ${fixture}` }, `(fixture) ${fixture}`);
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
