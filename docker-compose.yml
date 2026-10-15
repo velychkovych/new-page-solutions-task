@@ -1,0 +1,121 @@
+# Network isolation enforces "the agent reaches the mock only via MCP":
+#   agent <-> mcp  on `agent_net`
+#   mcp   <-> mock on `mock_net`
+# The agent has no route to the mock and no MOCK_API_TOKEN in its environment.
+# Each service gets an explicit `environment:` list (no env_file), so a secret in
+# .env reaches only the service that needs it.
+
+x-telemetry-env: &telemetry-env
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  TRACES_DIR: /app/traces
+  # Empty = JSONL only. `make up OBS=1` sets it to http://jaeger:4318.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 12
+  start_period: 5s
+
+services:
+  mock:
+    build: .
+    image: helpdesk:local
+    command: ["python", "-m", "helpdesk.mock"]
+    environment:
+      <<: *telemetry-env
+      MOCK_HOST: 0.0.0.0
+      MOCK_PORT: "8000"
+      MOCK_DB_PATH: /app/data/mock.sqlite
+      MOCK_API_TOKEN: ${MOCK_API_TOKEN:?run `make setup` to create .env}
+      MOCK_ADMIN_TOKEN: ${MOCK_ADMIN_TOKEN:?run `make setup` to create .env}
+      CHAOS_ENABLED: ${CHAOS_ENABLED:-false}
+      CHAOS_RATE_LIMIT_RATE: ${CHAOS_RATE_LIMIT_RATE:-0}
+      CHAOS_ERROR_RATE: ${CHAOS_ERROR_RATE:-0}
+      CHAOS_SLOW_RATE: ${CHAOS_SLOW_RATE:-0}
+      CHAOS_SLOW_MS: ${CHAOS_SLOW_MS:-2000}
+      CHAOS_SEED: ${CHAOS_SEED:-0}
+      CHAOS_FAIL_AFTER_COMMIT_RATE: ${CHAOS_FAIL_AFTER_COMMIT_RATE:-0}
+    volumes:
+      - mock_data:/app/data
+      - ./traces:/app/traces
+    networks: [mock_net]
+    # No published port: on Docker Desktop a published port is reachable from every
+    # container via host.docker.internal, which would give the agent a route to the mock.
+    # Host tooling uses `docker compose exec mock` instead (CONTRACTS.md §7).
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+
+  mcp:
+    image: helpdesk:local
+    command: ["python", "-m", "helpdesk.mcp_server"]
+    environment:
+      <<: *telemetry-env
+      # 0.0.0.0 also keeps FastMCP's localhost-only DNS-rebinding guard off, so `Host: mcp` works.
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8001"
+      MOCK_URL: http://mock:8000
+      MOCK_API_TOKEN: ${MOCK_API_TOKEN:?run `make setup` to create .env}
+    networks: [agent_net, mock_net]
+    ports: ["127.0.0.1:8001:8001"]
+    depends_on:
+      mock: {condition: service_healthy}
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+
+  agent:
+    image: helpdesk:local
+    command: ["python", "-m", "helpdesk.agent"]
+    environment:
+      <<: *telemetry-env
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: "8080"
+      MCP_URL: http://mcp:8001/mcp
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-anthropic}
+      MODEL_NAME: ${MODEL_NAME:-claude-sonnet-5-5}
+      MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-1024}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-}
+      MODEL_TIMEOUT_S: ${MODEL_TIMEOUT_S:-60}
+      MODEL_MAX_RETRIES: ${MODEL_MAX_RETRIES:-2}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AWS_REGION: ${AWS_REGION:-}
+      FAKE_MODEL_SCRIPT: ${FAKE_MODEL_SCRIPT:-}
+      CHECKPOINT_DB_PATH: /app/data/checkpoints.sqlite
+      STORE_DB_PATH: /app/data/store.sqlite
+      RECURSION_LIMIT: ${RECURSION_LIMIT:-25}
+      TURN_DEADLINE_S: ${TURN_DEADLINE_S:-90}
+      JAEGER_UI_URL: ${JAEGER_UI_URL:-}
+      WEB_DIR: /app/web
+    volumes:
+      - agent_data:/app/data
+      - ./traces:/app/traces
+    networks: [agent_net]
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      mcp: {condition: service_healthy}
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+
+  jaeger:
+    profiles: [observability]
+    image: jaegertracing/jaeger:2.22.0
+    # On both networks so every service can export to it. A container on two networks
+    # does not route between them, so this does not connect the agent to the mock.
+    networks: [agent_net, mock_net]
+    ports:
+      - "127.0.0.1:16686:16686"  # UI
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:13133/status"]
+
+networks:
+  agent_net: {}
+  mock_net: {}
+
+volumes:
+  mock_data: {}
+  agent_data: {}
