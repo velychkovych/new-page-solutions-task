@@ -1,12 +1,14 @@
 """FastAPI app factory for the agent (CONTRACTS §3.1, §4)."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi import Path as PathParam
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from langchain_core.language_models import BaseChatModel
 from opentelemetry.trace import Tracer
@@ -16,6 +18,12 @@ from helpdesk.agent.memory import Clock, utc_now
 from helpdesk.agent.persistence import open_checkpointer, open_store
 from helpdesk.agent.service import ChatService
 from helpdesk.agent.tool_provider import ToolProvider
+from helpdesk.agent.web_page import (
+    FIXTURE_MEDIA_TYPES,
+    WebPageError,
+    fixture_path,
+    render_index,
+)
 from helpdesk.shared.api import ChatRequest, ChatResponse, HealthResponse, SessionView
 from helpdesk.shared.ids import PRINCIPAL_ID_PATTERN
 from helpdesk.shared.settings import Settings
@@ -104,6 +112,22 @@ def create_app(
         # sends ": ping" while the turn is quiet.
         async for event in service.stream(body):
             yield ServerSentEvent(event=event.name.value, data=event.data)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> HTMLResponse:
+        try:
+            page = await asyncio.to_thread(render_index, settings.web_dir, settings.jaeger_ui_url)
+        except WebPageError as error:
+            logger.warning("web page unavailable: %s", error)
+            raise HTTPException(status_code=404) from None
+        return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/fixtures/{name}")
+    async def fixture(name: str) -> FileResponse:
+        path = await asyncio.to_thread(fixture_path, settings.web_dir, name)
+        if path is None:
+            raise HTTPException(status_code=404)
+        return FileResponse(path, media_type=FIXTURE_MEDIA_TYPES[path.suffix])
 
     @app.get("/sessions/{user_id}/{session_id}")
     async def session(
