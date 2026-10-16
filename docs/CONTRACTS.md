@@ -549,8 +549,12 @@ Every field is typed concretely, never `Any`, so the checkpointer can deserialis
   Host tooling reaches the mock with `docker compose exec mock ...`, which runs inside the
   mock container. This covers `make chaos-on`/`chaos-off`/`seed` and the eval runner's
   reset, chaos and `/admin/writes` calls. The tokens never reach the host shell.
-- Model providers. The model factory maps `MODEL_PROVIDER` to `init_chat_model`; no other
-  code path builds a model:
+- Model providers. The model factory (`helpdesk.agent.model`) maps `MODEL_PROVIDER` to
+  `init_chat_model` in `build_chat_model`, and `JUDGE_MODEL_PROVIDER`/`JUDGE_MODEL_NAME` (the
+  eval judge, default `anthropic`/`claude-haiku-5-5`) to the same `init_chat_model` path in
+  `build_judge_model`; no other code path builds a model. The judge factory has no `fake`
+  model: `JUDGE_MODEL_PROVIDER=fake` raises `ModelConfigError`, and the evals' fake tier passes
+  its own scripted judge.
 
   | `MODEL_PROVIDER` | `init_chat_model` provider | Class |
   |---|---|---|
@@ -561,7 +565,8 @@ Every field is typed concretely, never `Any`, so the checkpointer can deserialis
 
 - **No `temperature` is passed to any model**, for any provider. The installed
   `langchain-anthropic` rejects a non-default value for `claude-sonnet-5-5`. `max_tokens`,
-  the request timeout and SDK `max_retries` come from `Settings`.
+  the request timeout and SDK `max_retries` come from `Settings` (`MODEL_MAX_TOKENS`,
+  `MODEL_TIMEOUT_S`, `MODEL_MAX_RETRIES`, shared by the agent's model and the judge).
 - Config is read only through `helpdesk.shared.settings.Settings`. Every field is listed in
   `.env.example`, and a unit test enforces this.
 

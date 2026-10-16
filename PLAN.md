@@ -55,6 +55,7 @@ Out of scope (state these in the README, do not build them):
 | Tracing | OpenTelemetry SDK, OpenInference LangChain instrumentation, FastAPI and httpx instrumentation. Exporters: JSONL file (default) and OTLP to Jaeger (compose profile `observability`). |
 | Front end | One static `web/index.html` with vanilla JS, served by the agent service |
 | Quality | ruff (lint and format), mypy (strict on `src/`), pytest + pytest-asyncio, respx |
+| Evals | DeepEval: LLM-as-judge with `ConversationalGEval`. The judge model comes from `JUDGE_MODEL_PROVIDER`/`JUDGE_MODEL_NAME` and is built by the same model factory; the default is `claude-haiku-5-5` to save budget, production would use `claude-opus-5-5`. |
 | Runtime | docker-compose services: `mock`, `mcp`, `agent`, and optionally `jaeger` |
 
 **Claude API specifics:**
@@ -468,6 +469,8 @@ Steps:
   12. Chaos (100% 503) → an honest failure message, no write, no made-up ticket id
   13. Invalid ticket id from the user → the agent handles `NOT_FOUND` and asks
 - The live tier needs a real model key. The deterministic tier (fake model) runs in `make test`.
+- Cases and checks run through DeepEval: one `ConversationalTestCase` per run. Every deterministic check is a custom DeepEval metric that reads the trace and writes evidence. Judge metrics grade only the reply's meaning, never a safety property (approval, no write, no duplicate, isolation, injection).
+- A run whose first search already returned every match is reported "not exercised" for the pagination case (4), not passed or failed.
 
 **Track G — Docs skeleton and assets**
 
