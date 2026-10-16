@@ -29,7 +29,9 @@ if "deepeval" in sys.modules:
     # Too late: its settings, cache folder and .env loading were fixed at its import.
     raise ImportError("deepeval was imported before evals; import evals first")
 
-# Per user where there are users: another account cannot pre-create our folder.
+# Per user where there are users, so two accounts on a shared /tmp do not collide on one
+# folder. The suffix does not stop another account from creating this folder first; what
+# matters is that deepeval never reads a legacy keyfile from it (disabled below).
 _USER = f"-{os.getuid()}" if hasattr(os, "getuid") else ""
 DEEPEVAL_HOME = Path(tempfile.gettempdir()) / f"helpdesk-evals-deepeval{_USER}"
 DEEPEVAL_ENV: dict[str, str] = {
