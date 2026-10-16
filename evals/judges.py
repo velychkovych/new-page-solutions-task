@@ -5,6 +5,11 @@
   agent: max_tokens, timeout and the SDK's own retries from Settings, no temperature.
   DeepEval's native AnthropicModel would turn the SDK retries off and retry with its own
   policy; a custom model gets no retry layer from DeepEval (it calls `a_generate` once).
+  DeepEval does call it a second time, without the schema, when it raises a TypeError,
+  so every failure inside the call leaves as a JudgeError instead.
+- A model that cannot be forced to call the schema tool (langchain-anthropic does not
+  force it on claude-opus-5-5 or claude-sonnet-5-5) may answer the G-Eval prompt with
+  JSON text. That text goes back to DeepEval, which parses JSON text from any model.
 - `ScriptedJudge` is the deterministic tier's judge: a fixed verdict from the case file.
 
 DeepEval accepts `(result, cost)` from a custom model's `a_generate` and reads the token
@@ -17,8 +22,12 @@ from typing import Any
 
 from deepeval.models import DeepEvalBaseLLM
 from deepeval.models.utils import EvaluationCost
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
 
 from evals.cases import Case, FakeVerdict, JudgeSpec
@@ -36,7 +45,11 @@ type JudgeFor = Callable[[Case, JudgeSpec], DeepEvalBaseLLM]
 
 
 class JudgeError(RuntimeError):
-    """The judge's answer could not be used (no structured output)."""
+    """The judge's answer could not be used. `cost` is what the failed call still used."""
+
+    def __init__(self, message: str, cost: EvaluationCost | None = None) -> None:
+        super().__init__(message)
+        self.cost = cost if cost is not None else EvaluationCost(None, 0, 0)
 
 
 def usage_cost(message: object) -> EvaluationCost:
@@ -49,6 +62,23 @@ def usage_cost(message: object) -> EvaluationCost:
 
 def cost_tokens(input_tokens: int | None, output_tokens: int | None) -> TokenUsage:
     return TokenUsage(input=input_tokens or 0, output=output_tokens or 0)
+
+
+class _LastMessage(BaseCallbackHandler):
+    """Keeps the model's reply even when a parser after it raises, for its text and tokens."""
+
+    run_inline = True
+
+    def __init__(self) -> None:
+        self.message: AIMessage | None = None
+
+    def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        for generations in response.generations:
+            for generation in generations:
+                if isinstance(generation, ChatGeneration) and isinstance(
+                    generation.message, AIMessage
+                ):
+                    self.message = generation.message
 
 
 class LangChainJudge(DeepEvalBaseLLM):
@@ -67,31 +97,64 @@ class LangChainJudge(DeepEvalBaseLLM):
 
     @staticmethod
     def _parsed(output: Any, schema: type[BaseModel]) -> JudgeOutput:
+        raw = output.get("raw") if isinstance(output, dict) else None
         parsed = output.get("parsed") if isinstance(output, dict) else None
-        if not isinstance(parsed, schema):
-            error = output.get("parsing_error") if isinstance(output, dict) else None
-            raise JudgeError(f"no {schema.__name__} in the judge's answer: {error!r}")
-        return parsed, usage_cost(output.get("raw"))
+        if isinstance(parsed, schema):
+            return parsed, usage_cost(raw)
+        if isinstance(raw, AIMessage) and raw.text.strip():
+            # No tool call, but an answer in text: DeepEval parses JSON out of it.
+            return raw.text, usage_cost(raw)
+        error = output.get("parsing_error") if isinstance(output, dict) else None
+        raise JudgeError(f"no {schema.__name__} in the judge's answer: {error!r}", usage_cost(raw))
+
+    @staticmethod
+    def _failed(exc: Exception, last: _LastMessage) -> JudgeError:
+        return JudgeError(
+            f"judge call failed: {type(exc).__name__}: {exc}", usage_cost(last.message)
+        )
+
+    def _structured(self, schema: type[BaseModel]) -> Any:
+        return self._chat.with_structured_output(schema, include_raw=True)
 
     # The base class declares `-> str`; DeepEval also takes (result, cost), which is the
     # only way a custom model reports its tokens.
     def generate(  # type: ignore[override]
         self, prompt: str, schema: type[BaseModel] | None = None
     ) -> JudgeOutput:
-        if schema is None:
-            message = self._chat.invoke(prompt)
-            return message.text, usage_cost(message)
-        runnable = self._chat.with_structured_output(schema, include_raw=True)
-        return self._parsed(runnable.invoke(prompt), schema)
+        last = _LastMessage()
+        config = RunnableConfig(callbacks=[last])
+        try:
+            if schema is None:
+                message = self._chat.invoke(prompt, config)
+                return message.text, usage_cost(message)
+            return self._parsed(self._structured(schema).invoke(prompt, config), schema)
+        except OutputParserException as exc:
+            return self._text_or_fail(exc, last)
+        except TypeError as exc:
+            raise self._failed(exc, last) from exc
 
     async def a_generate(  # type: ignore[override]
         self, prompt: str, schema: type[BaseModel] | None = None
     ) -> JudgeOutput:
-        if schema is None:
-            message = await self._chat.ainvoke(prompt)
+        last = _LastMessage()
+        config = RunnableConfig(callbacks=[last])
+        try:
+            if schema is None:
+                message = await self._chat.ainvoke(prompt, config)
+                return message.text, usage_cost(message)
+            return self._parsed(await self._structured(schema).ainvoke(prompt, config), schema)
+        except OutputParserException as exc:
+            return self._text_or_fail(exc, last)
+        except TypeError as exc:
+            raise self._failed(exc, last) from exc
+
+    @classmethod
+    def _text_or_fail(cls, exc: OutputParserException, last: _LastMessage) -> JudgeOutput:
+        """A model not forced to call the tool answered in text: hand that text on."""
+        message = last.message
+        if message is not None and message.text.strip():
             return message.text, usage_cost(message)
-        runnable = self._chat.with_structured_output(schema, include_raw=True)
-        return self._parsed(await runnable.ainvoke(prompt), schema)
+        raise cls._failed(exc, last) from exc
 
 
 class ScriptedJudge(DeepEvalBaseLLM):

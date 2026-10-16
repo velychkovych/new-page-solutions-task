@@ -10,6 +10,7 @@ import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable, RunnableLambda
 from pydantic import BaseModel, Field, SecretStr
 from tests.unit.evals.conftest import collected, evidence, make_case, response, score, turn_run
@@ -85,6 +86,104 @@ async def test_an_answer_without_the_schema_is_an_error() -> None:
     judge = LangChainJudge(_fake([None]), "m")
     with pytest.raises(JudgeError, match="no Verdict"):
         await judge.a_generate("grade this", schema=Verdict)
+
+
+class TypeErrorFake(FakeMessagesListChatModel):
+    """A chat model whose structured call raises TypeError somewhere inside the stack."""
+
+    structured_calls: int = 0
+
+    def with_structured_output(  # type: ignore[override]
+        self, schema: Any, *, include_raw: bool = False, **kwargs: Any
+    ) -> Runnable[Any, Any]:
+        def answer(prompt: Any) -> Any:
+            self.structured_calls += 1
+            raise TypeError("unexpected response shape")
+
+        return RunnableLambda(answer)
+
+
+async def test_a_type_error_in_the_call_fails_once_instead_of_a_second_unstructured_call() -> None:
+    free_text = AIMessage(content='{"score": 3, "reason": "free text"}')
+    fake = TypeErrorFake(responses=[free_text])
+    judge = LangChainJudge(fake, "m")
+    # The method DeepEval calls: on a TypeError it would call a_generate again, schemaless.
+    with pytest.raises(JudgeError, match="TypeError: unexpected response shape"):
+        await judge.a_generate_with_schema("grade this", schema=Verdict)
+    with pytest.raises(JudgeError):
+        judge.generate_with_schema("grade this", schema=Verdict)
+    assert fake.structured_calls == 2  # one per call above
+    assert fake.i == 0  # the plain, schemaless model was never called
+
+
+class TextAnswerAnthropic(ChatAnthropic):
+    """The real ChatAnthropic structured-output path, with a canned reply instead of the API."""
+
+    reply: AIMessage
+
+    async def _agenerate(self, messages: Any, *args: Any, **kwargs: Any) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=self.reply)])
+
+    def _generate(self, messages: Any, *args: Any, **kwargs: Any) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=self.reply)])
+
+
+def _anthropic(model: str, reply: AIMessage) -> TextAnswerAnthropic:
+    return TextAnswerAnthropic(model=model, api_key=SecretStr("sk-ant-dummy"), reply=reply)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+@pytest.mark.filterwarnings("ignore:You are attempting to use structured output")
+async def test_a_judge_that_answers_in_json_text_is_graded(model: str) -> None:
+    # langchain-anthropic cannot force the tool call on these models, so the model may
+    # answer the G-Eval prompt in text; DeepEval parses JSON text from any model.
+    text = AIMessage(
+        content='{"reason": "refuses politely", "score": 10}',
+        usage_metadata=_usage(50, 7),  # type: ignore[arg-type]
+    )
+    judge = LangChainJudge(_anthropic(model, text), model)
+    result, cost = await judge.a_generate("grade this", schema=Verdict)
+    assert result == '{"reason": "refuses politely", "score": 10}'
+    assert (cost.input_tokens, cost.output_tokens) == (50, 7)
+    assert judge.generate("grade this", schema=Verdict)[0] == result
+    setup = Judges(judge_for=lambda case, spec: judge, model=model, provider="a", note="")
+    scored = await score(_judged_run(), setup)
+    assert scored.outcome is Outcome.PASSED, scored.reasons
+    assert (scored.judge_tokens.input, scored.judge_tokens.output) == (50, 7)
+
+
+async def test_the_default_judge_still_answers_through_the_forced_tool_call() -> None:
+    call = AIMessage(
+        content="",
+        tool_calls=[{"name": "Verdict", "args": {"reason": "ok", "score": 10}, "id": "t1"}],
+        usage_metadata=_usage(30, 9),  # type: ignore[arg-type]
+    )
+    judge = LangChainJudge(_anthropic("claude-haiku-5-5", call), "claude-haiku-5-5")
+    result, cost = await judge.a_generate("grade this", schema=Verdict)
+    assert result == Verdict(reason="ok", score=10)
+    assert (cost.input_tokens, cost.output_tokens) == (30, 9)
+
+
+@pytest.mark.filterwarnings("ignore:You are attempting to use structured output")
+async def test_an_empty_text_answer_is_a_judge_error_with_its_tokens() -> None:
+    empty = AIMessage(content="", usage_metadata=_usage(40, 0))  # type: ignore[arg-type]
+    judge = LangChainJudge(_anthropic("claude-opus-5-5", empty), "claude-opus-5-5")
+    with pytest.raises(JudgeError) as raised:
+        await judge.a_generate("grade this", schema=Verdict)
+    assert (raised.value.cost.input_tokens, raised.value.cost.output_tokens) == (40, 0)
+
+
+async def test_the_tokens_of_a_failed_judge_call_still_reach_the_report() -> None:
+    fake = _fake([None])  # the call used 120/30 tokens but held no Verdict
+    judge = LangChainJudge(fake, "m")
+    setup = Judges(judge_for=lambda case, spec: judge, model="m", provider="a", note="")
+    result = await score(_judged_run(), setup)
+    assert result.outcome is Outcome.FAILED
+    (metric,) = result.metrics
+    assert metric.error is not None
+    assert metric.error.startswith("judge error: JudgeError")
+    assert (metric.tokens.input, metric.tokens.output) == (120, 30)
+    assert (result.judge_tokens.input, result.judge_tokens.output) == (120, 30)
 
 
 def _judged_run() -> Any:

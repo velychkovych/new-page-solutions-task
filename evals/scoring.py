@@ -21,7 +21,7 @@ from deepeval.test_case import ConversationalTestCase
 
 from evals.dataset import build_test_case
 from evals.driver import CollectedRun
-from evals.judges import JudgeFor, cost_tokens
+from evals.judges import JudgeError, JudgeFor, cost_tokens
 from evals.metrics import ExpectationMetric, expectation_metrics, judge_metrics
 from evals.results import CaseRunResult, MetricKind, MetricResult, Outcome
 from evals.traces import TokenUsage
@@ -74,6 +74,10 @@ async def _measure_judge(
         except Exception as exc:
             # The judge failed (API error after the SDK's retries, an answer without the
             # schema); the metric fails and says so, instead of ending the whole run.
+            if isinstance(exc, JudgeError):
+                # A call that answered unusably was still paid for; DeepEval only counts
+                # the tokens of a call that returns.
+                metric._accrue_tokens(exc.cost.input_tokens, exc.cost.output_tokens)
             metric.error = f"judge error: {type(exc).__name__}: {exc}"
             metric.success = False
 
