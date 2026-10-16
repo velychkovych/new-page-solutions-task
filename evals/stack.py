@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import contextlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -47,6 +48,13 @@ class CommandResult:
     stderr: str
 
 
+async def _kill(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+
+
 async def run_command(
     args: Sequence[str],
     *,
@@ -67,9 +75,12 @@ async def run_command(
     try:
         out, err = await asyncio.wait_for(process.communicate(), timeout_s)
     except TimeoutError as exc:
-        process.kill()
-        await process.wait()
+        await _kill(process)
         raise StackError(f"{' '.join(args[:4])} timed out after {timeout_s:.0f} s") from exc
+    except asyncio.CancelledError:
+        # The runner is going away (SIGTERM, Ctrl-C); the command must not outlive it.
+        await _kill(process)
+        raise
     return CommandResult(
         returncode=process.returncode if process.returncode is not None else -1,
         stdout=out.decode("utf-8", errors="replace"),

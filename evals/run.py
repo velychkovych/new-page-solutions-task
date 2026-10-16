@@ -10,14 +10,16 @@ results go to evals/results/fake/ and never replace the committed live results.
 Exit status: 0 every run passed, 1 a run failed (results are written either way),
 2 an infrastructure error (stack not reachable, a command failed) or bad arguments. An
 infrastructure error after some runs finished still writes their results, marked aborted.
+143 terminated by SIGTERM, after cleaning up the stack; nothing is written.
 """
 
 import argparse
 import asyncio
 import contextlib
+import signal
 import sys
 import tempfile
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +45,7 @@ FAKE_REPEATS = 1
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_INFRA = 2
+EXIT_TERMINATED = 128 + signal.SIGTERM
 
 type Progress = Callable[[str], None]
 
@@ -171,6 +174,26 @@ async def evaluate_cases(
     return build_report(metadata, cases, results)
 
 
+async def cancel_on_sigterm[T](work: Awaitable[T]) -> T:
+    """Await `work`, cancelling it on SIGTERM as asyncio.run does on Ctrl-C.
+
+    The default SIGTERM action ends the process at once: no finally block runs, so the
+    fake tier's processes and temporary directory, or the live tier's chaos, are left
+    behind. Cancelling runs every cleanup on the way out.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    if task is None:  # pragma: no cover - always awaited inside asyncio.run
+        return await work
+    with contextlib.suppress(NotImplementedError):  # no signal handlers on Windows
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        return await work
+    finally:
+        with contextlib.suppress(NotImplementedError):
+            loop.remove_signal_handler(signal.SIGTERM)
+
+
 def summary_lines(report: Report, out: Path) -> list[str]:
     tokens = report.tokens
     overall = report.overall
@@ -198,21 +221,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: no case matches the filters", file=sys.stderr)
         return EXIT_INFRA
     repeats = args.repeats or (FAKE_REPEATS if args.fake else LIVE_REPEATS)
+    return run_and_report(args, cases, repeats)
+
+
+def run_and_report(args: argparse.Namespace, cases: Sequence[Case], repeats: int) -> int:
     try:
         report = asyncio.run(
-            evaluate_cases(
-                cases,
-                fake=args.fake,
-                model=args.model,
-                repeats=repeats,
-                chaos_only=args.chaos,
-                case_filter=args.case,
-                progress=print,
+            cancel_on_sigterm(
+                evaluate_cases(
+                    cases,
+                    fake=args.fake,
+                    model=args.model,
+                    repeats=repeats,
+                    chaos_only=args.chaos,
+                    case_filter=args.case,
+                    progress=print,
+                )
             )
         )
     except StackError as exc:
         print(f"infrastructure error: {exc}", file=sys.stderr)
         return EXIT_INFRA
+    except asyncio.CancelledError:
+        print("terminated: the stack was cleaned up, no results written", file=sys.stderr)
+        return EXIT_TERMINATED
     write_report(report, args.out)
     for line in summary_lines(report, args.out):
         print(line)
