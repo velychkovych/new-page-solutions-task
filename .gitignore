@@ -23,3 +23,6 @@ build/
 .DS_Store
 .idea/
 .vscode/
+
+# deterministic eval tier output (`python -m evals.run --fake`); live results are committed
+evals/results/fake/

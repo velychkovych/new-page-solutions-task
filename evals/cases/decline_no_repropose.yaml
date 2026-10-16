@@ -1,0 +1,37 @@
+id: decline_no_repropose
+title: Decline -> no write, and no new proposal on the next message
+plan_case: 5
+user_id: carol
+turns:
+  - message: My laptop's webcam shows only a black image in Teams and Zoom since yesterday.
+    expect:
+      status: awaiting_approval
+  - decision: decline
+    expect:
+      status: ok
+  - message: Thanks. Is there anything I can try myself in the meantime?
+    expect:
+      status: ok
+expect:
+  proposed_tool: create_ticket
+  max_proposals: 1
+  writes_executed: 0
+  no_write_before_approval: true
+  final_status: ok
+fake:
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: webcam}
+    - content: There is no ticket about this yet, so I'd like to open one.
+      tool_calls:
+        - name: create_ticket
+          args:
+            title: Laptop webcam shows a black image in Teams and Zoom
+            description: Since yesterday the laptop webcam shows only a black image in Teams and Zoom.
+            category: hardware
+            priority: medium
+    - content: OK, I won't open a ticket. Tell me if you change your mind.
+  - - content: >-
+        Check that the camera's privacy shutter is open, and that Teams and Zoom are allowed
+        to use the camera in the Windows privacy settings. Restarting the laptop also helps
+        after a driver update.

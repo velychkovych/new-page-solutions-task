@@ -1,0 +1,33 @@
+id: new_issue_create_ticket
+title: New issue -> search first, then propose create_ticket
+plan_case: 1
+user_id: bob
+setup: {chaos: off}
+turns:
+  - message: >-
+      The external monitor at my desk stopped being detected after this morning's
+      docking station firmware update. The second screen just stays black.
+    expect:
+      status: awaiting_approval
+expect:
+  tools_called_in_order_contains: [search_tickets]
+  proposed_tool: create_ticket
+  max_proposals: 1
+  no_write_before_approval: true
+  writes_executed: 0
+  no_invented_ticket_ids: true
+  final_status: awaiting_approval
+fake:
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: monitor docking station}
+    - content: I found no existing ticket about this, so I'd like to open one.
+      tool_calls:
+        - name: create_ticket
+          args:
+            title: External monitor not detected after docking station firmware update
+            description: >-
+              Since this morning's docking station firmware update the external monitor
+              is not detected; the second screen stays black.
+            category: hardware
+            priority: medium

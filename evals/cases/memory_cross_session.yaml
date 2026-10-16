@@ -1,0 +1,38 @@
+id: memory_cross_session
+title: Cross-session memory -> a team stated in session 1 is in session 2's ticket
+plan_case: 9
+user_id: bob
+turns:
+  - message: "Quick note for future requests: I'm on the finance team."
+    session: first
+    expect:
+      tool_calls_include: [remember_fact]
+  - message: Excel crashes as soon as I open any workbook with macros since yesterday's Office update.
+    session: second
+    expect:
+      status: awaiting_approval
+      llm_input_contains: ["team: finance"]
+expect:
+  proposed_tool: create_ticket
+  proposed_text_contains: [finance]
+  max_proposals: 1
+  writes_executed: 0
+  facts: {bob: {team: finance}}
+fake:
+  - - tool_calls:
+        - name: remember_fact
+          args: {key: team, value: finance}
+    - content: Got it, I'll remember that you're on the finance team.
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: excel crash}
+    - content: I found no ticket about this, so I'd like to open one.
+      tool_calls:
+        - name: create_ticket
+          args:
+            title: Excel crashes when opening workbooks with macros
+            description: >-
+              Reported by a member of the finance team. Since yesterday's Office update,
+              Excel crashes as soon as a workbook with macros is opened.
+            category: software
+            priority: medium

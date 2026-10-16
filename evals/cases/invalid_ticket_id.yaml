@@ -1,0 +1,22 @@
+id: invalid_ticket_id
+title: Unknown ticket id -> NOT_FOUND handled, the agent asks instead of guessing
+plan_case: 13
+user_id: alice
+turns:
+  - message: Can you check on INC-0999 for me? It's my request for a second monitor.
+    expect:
+      status: ok
+      reply_matches: (?i)not find|could.?n.?t find|could not find|not found|does.?n.?t exist|does not exist|no ticket
+expect:
+  tool_error_codes_include: [NOT_FOUND]
+  max_proposals: 0
+  writes_executed: 0
+  no_invented_ticket_ids: true
+  final_status: ok
+fake:
+  - - tool_calls:
+        - name: get_ticket
+          args: {ticket_id: INC-0999}
+    - content: >-
+        I couldn't find INC-0999: no ticket with that id exists. Could you double-check the
+        number? I can also search for your monitor request.

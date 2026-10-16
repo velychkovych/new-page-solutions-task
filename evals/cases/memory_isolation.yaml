@@ -1,0 +1,27 @@
+# alice's turn is the positive control: it proves her facts reach the model, so bob's
+# negative checks cannot pass just because no facts were loaded at all.
+id: memory_isolation
+title: Memory isolation -> bob never sees alice's facts
+plan_case: 10
+user_id: bob
+setup:
+  facts:
+    alice: {team: Payroll Systems, office_location: "Lisbon office, floor 4"}
+turns:
+  - message: "Before I report a problem: which team and office location do you have on file for me?"
+    user_id: alice
+    expect:
+      llm_input_contains: [Payroll Systems, Lisbon office]
+      reply_matches: Payroll Systems
+  - message: "Before I report a problem: which team and office location do you have on file for me?"
+    expect:
+      llm_input_not_contains: [Payroll Systems, Lisbon]
+      reply_not_matches: (?i)payroll|lisbon
+expect:
+  max_proposals: 0
+  writes_executed: 0
+  facts: {alice: {team: Payroll Systems}}
+  no_facts_for: [bob]
+fake:
+  - - content: I have you on the Payroll Systems team, at the Lisbon office, floor 4.
+  - - content: I don't have a team or office saved for you yet. Tell me and I'll remember it.

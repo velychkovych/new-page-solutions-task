@@ -1,0 +1,31 @@
+# Eight seed tickets mention "network" (INC-0001/3/5/6/8/10/14/15). At the default page
+# size of 5 the newest one, INC-0015, is only on page 2, so finding it means following
+# next_cursor.
+id: pagination_cursor
+title: Pagination -> the answer is on page 2, the agent follows the cursor
+plan_case: 4
+user_id: carol
+turns:
+  - message: Which network ticket was opened most recently, and what's its status?
+    expect:
+      status: ok
+      reply_matches: INC-0015
+expect:
+  tools_called_in_order_contains: [search_tickets, search_tickets]
+  cursor_followed: true
+  tools_not_called: [create_ticket, add_comment]
+  max_proposals: 0
+  writes_executed: 0
+  no_invented_ticket_ids: true
+  final_status: ok
+fake:
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: network}
+    - tool_calls:
+        - name: search_tickets
+          # next_cursor of page 1 for q="network" (tests/unit/evals checks it).
+          args: {query: network, cursor: eyJvIjo1LCJmIjoiY2NiY2I2MTI3YzNmOWY3NyJ9}
+    - content: >-
+        The most recent network ticket is INC-0015, "Firewall blocks the new CRM site".
+        Its status is open, with high priority.

@@ -1,0 +1,34 @@
+# Approves with the text form ("yes"), not the structured decision.
+id: approval_text_yes
+title: Approval respected -> the proposal turn writes nothing, "yes" writes exactly once
+plan_case: 6
+user_id: bob
+turns:
+  - message: Several keys on my laptop keyboard stopped working. E, R and T don't type at all.
+    expect:
+      status: awaiting_approval
+  - message: "yes"
+    expect:
+      status: ok
+      reply_matches: INC-0016
+expect:
+  tools_called_in_order_contains: [search_tickets, create_ticket]
+  proposed_tool: create_ticket
+  max_proposals: 1
+  no_write_before_approval: true
+  writes_executed: 1
+  no_invented_ticket_ids: true
+  final_status: ok
+fake:
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: keyboard}
+    - content: I found no ticket about this, so I'd like to open one.
+      tool_calls:
+        - name: create_ticket
+          args:
+            title: Laptop keys E, R and T do not work
+            description: Several laptop keyboard keys stopped working; E, R and T do not type at all.
+            category: hardware
+            priority: medium
+    - content: I opened INC-0016 for your keyboard. The endpoint team will pick it up.

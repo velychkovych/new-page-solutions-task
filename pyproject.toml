@@ -70,6 +70,10 @@ ignore = [
 "evals/**" = ["T20", "S101"]
 "scripts/**" = ["T20"]
 
+[tool.ruff.lint.isort]
+# The eval runner package at the repo root (`python -m evals.run`).
+known-first-party = ["evals"]
+
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
@@ -79,7 +83,7 @@ quote-style = "double"
 [tool.mypy]
 python_version = "3.14"
 strict = true
-files = ["src"]
+files = ["src", "evals"]
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
 
@@ -91,6 +95,8 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 minversion = "9.0"
 testpaths = ["tests"]
+# The repo root, so tests can import the `evals` package (run as `python -m evals.run`).
+pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["-ra", "--import-mode=importlib", "--strict-markers", "--strict-config", "-m", "not e2e and not live"]

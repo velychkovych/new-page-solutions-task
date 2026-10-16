@@ -1,0 +1,38 @@
+# Moderate chaos (evals/chaos_profiles.py): its seed fails the first request, so the
+# search is retried, and never fails one call three times in a row.
+id: chaos_moderate_completes
+title: Moderate chaos -> the task completes, retries visible in the trace, one write
+plan_case: 11
+user_id: carol
+setup: {chaos: moderate}
+turns:
+  - message: >-
+      My USB headset keeps cutting out during calls. The sound drops for a few seconds
+      every couple of minutes.
+    expect:
+      status: awaiting_approval
+  - decision: approve
+    expect:
+      status: ok
+      reply_matches: INC-0016
+expect:
+  tools_called_in_order_contains: [search_tickets, create_ticket]
+  proposed_tool: create_ticket
+  retries_seen: true
+  no_write_before_approval: true
+  writes_executed: 1
+  no_invented_ticket_ids: true
+  final_status: ok
+fake:
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: headset}
+    - content: There is no ticket about this yet, so I'd like to open one.
+      tool_calls:
+        - name: create_ticket
+          args:
+            title: USB headset audio drops during calls
+            description: The USB headset audio drops for a few seconds every couple of minutes during calls.
+            category: hardware
+            priority: medium
+    - content: I opened INC-0016 for your headset.

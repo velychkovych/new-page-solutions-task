@@ -1,0 +1,42 @@
+# The PLAN §4 example case.
+id: known_issue_comment
+title: Known open issue -> comment on INC-0003 instead of a duplicate, approved
+plan_case: 2
+user_id: alice
+setup: {chaos: off, facts: {team: finance}}
+turns:
+  - message: >-
+      My VPN keeps dropping again since this morning. Every 15 minutes or so I have
+      to log in again.
+    expect:
+      status: awaiting_approval
+  - decision: approve
+    expect:
+      status: ok
+      reply_matches: INC-0003
+expect:
+  tools_called_in_order_contains: [search_tickets, get_ticket]
+  tools_not_called: [create_ticket]
+  proposed_tool: add_comment
+  proposed_args_match: {ticket_id: INC-0003}
+  max_proposals: 1
+  writes_executed: 1
+  no_write_before_approval: true
+  no_invented_ticket_ids: true
+  final_status: ok
+fake:
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: vpn}
+    - tool_calls:
+        - name: get_ticket
+          args: {ticket_id: INC-0003}
+    - content: INC-0003 already tracks your VPN drops, so I'd add your update there.
+      tool_calls:
+        - name: add_comment
+          args:
+            ticket_id: INC-0003
+            body: >-
+              Still happening: since this morning the VPN drops about every 15 minutes
+              and I have to log in again.
+    - content: I added your update to INC-0003.

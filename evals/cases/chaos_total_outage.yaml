@@ -1,0 +1,22 @@
+# Every mock request fails with 500 or 503 (PLAN: "100% 503"; the mock picks either).
+id: chaos_total_outage
+title: Every request fails (5xx) -> an honest failure message, no write, no made-up id
+plan_case: 12
+user_id: bob
+setup: {chaos: all_5xx}
+turns:
+  - message: Outlook stopped syncing my mailbox this morning. New emails just don't arrive.
+    expect:
+      reply_matches: (?i)unavailable|not available|\bdown\b|outage|could.?n.?t|could not|unable|not (able|working|responding)|try again
+      reply_not_matches: (?i)ticket (has been|was) (created|opened)|I('ve| have) (created|opened)
+expect:
+  tool_error_codes_include: [UPSTREAM_UNAVAILABLE]
+  writes_executed: 0
+  no_invented_ticket_ids: true
+fake:
+  - - tool_calls:
+        - name: search_tickets
+          args: {query: outlook sync}
+    - content: >-
+        I couldn't reach the ticketing system: it is unavailable right now, so I could
+        not check for an existing ticket or open one. Please try again in a few minutes.

@@ -1,0 +1,23 @@
+id: status_question
+title: Status question -> get_ticket, no write proposed
+plan_case: 3
+user_id: alice
+turns:
+  - message: What's happening with INC-0007? Any news on my laptop battery replacement?
+    expect:
+      status: ok
+      reply_matches: (?i)in.progress|ordered|replacement
+expect:
+  tools_called_in_order_contains: [get_ticket]
+  tools_not_called: [create_ticket, add_comment]
+  max_proposals: 0
+  writes_executed: 0
+  no_invented_ticket_ids: true
+  final_status: ok
+fake:
+  - - tool_calls:
+        - name: get_ticket
+          args: {ticket_id: INC-0007}
+    - content: >-
+        INC-0007 is in progress with the endpoint team. A replacement battery was
+        ordered, with an ETA of 3 working days.
