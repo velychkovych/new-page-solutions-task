@@ -15,6 +15,8 @@ class ErrorCode(StrEnum):
     UPSTREAM_UNAVAILABLE = "UPSTREAM_UNAVAILABLE"
     TIMEOUT = "TIMEOUT"
     AUTH = "AUTH"
+    # A bug inside our own service, not caused by the arguments or the ticketing system.
+    INTERNAL = "INTERNAL"
 
 
 # Defaults only; a tool may give a more specific next step.
@@ -28,6 +30,10 @@ DEFAULT_NEXT_STEP: Mapping[ErrorCode, str] = MappingProxyType(
         ),
         ErrorCode.TIMEOUT: "Tell the user the ticketing system timed out and to try again later",
         ErrorCode.AUTH: "Tell the user to contact an administrator",
+        ErrorCode.INTERNAL: (
+            "Do not retry this call; tell the user the request failed because of an internal"
+            " error and to contact an administrator"
+        ),
     }
 )
 

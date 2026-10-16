@@ -238,6 +238,13 @@ it does.
 | `UPSTREAM_UNAVAILABLE` | Retries exhausted before the deadline: 429, 5xx, connect error, per-attempt timeout |
 | `TIMEOUT` | The 15 s total deadline was reached |
 | `AUTH` | Mock 401/403, a misconfiguration. The next step tells the user to contact an admin. |
+| `INTERNAL` | An unexpected failure inside our own code (a bug), not caused by the arguments or the mock. Not retried. |
+
+- Error text must be specific enough for the model to act on. `<what happened>` names the
+  tool and the concrete cause: the invalid argument and why, the ticket id, the last upstream
+  status and the number of attempts, or the deadline. `<what the model should do>` is one
+  concrete action. A write whose outcome is unknown (timeout, retries exhausted, malformed
+  response) says the change could not be confirmed and that no ticket id may be made up.
 
 - **Argument validation failures must use the same exact text.** In the installed mcp 1.30.0,
   FastMCP validates arguments inside `Tool.run` **before** the tool body runs, and it wraps
