@@ -25,7 +25,12 @@ from pydantic import Field, JsonValue
 
 from helpdesk.agent.graph import AgentGraph, build_graph
 from helpdesk.agent.persistence import open_checkpointer, open_store
-from helpdesk.agent.tool_provider import ToolDefinition, ToolResult, ToolTransportError
+from helpdesk.agent.tool_provider import (
+    ProgressCallback,
+    ToolDefinition,
+    ToolResult,
+    ToolTransportError,
+)
 from helpdesk.shared.settings import Settings
 from helpdesk.shared.tools import AddCommentArgs, CreateTicketArgs, GetTicketArgs, SearchTicketsArgs
 
@@ -103,6 +108,8 @@ class FakeToolProvider:
     replies: dict[str, list[Reply]] = field(default_factory=dict)
     calls: list[RecordedCall] = field(default_factory=list)
     delay_s: float = 0.0
+    # Progress messages sent to a call's `on_progress` (when it passes one) before it replies.
+    progress: dict[str, list[str]] = field(default_factory=dict)
 
     async def list_tools(self) -> Sequence[ToolDefinition]:
         return [
@@ -116,9 +123,18 @@ class FakeToolProvider:
             _definition("add_comment", "Comment on a ticket (needs approval).", AddCommentArgs),
         ]
 
-    async def call(self, name: str, args: Mapping[str, JsonValue]) -> ToolResult:
+    async def call(
+        self,
+        name: str,
+        args: Mapping[str, JsonValue],
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolResult:
         key = args.get("idempotency_key")
         self.calls.append(RecordedCall(name, dict(args), key if isinstance(key, str) else None))
+        if on_progress is not None:
+            for message in self.progress.get(name, []):
+                await on_progress(message)
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
         queue = self.replies.get(name)

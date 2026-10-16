@@ -1,11 +1,11 @@
 """The agent's only door to the ticketing tools (CONTRACTS §2, §5.3).
 
-Phase 1 builds the graph against this protocol with a fake; Phase 2 implements it
-with langchain-mcp-adapters. Keeping it this narrow means the graph never sees MCP
-types, and the one tool retry layer stays in the MCP server.
+The graph is built against this protocol; `mcp_provider.McpToolProvider` implements it
+with langchain-mcp-adapters, and the unit tests with a fake. Keeping it this narrow means
+the graph never sees MCP types, and the one tool retry layer stays in the MCP server.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, JsonValue
@@ -42,14 +42,25 @@ class ToolTransportError(Exception):
     """
 
 
+# Receives the MCP server's progress messages for one call, e.g. "Retrying (attempt 2 of 3)".
+type ProgressCallback = Callable[[str], Awaitable[None]]
+
+
 class ToolProvider(Protocol):
     async def list_tools(self) -> Sequence[ToolDefinition]:
         """Model-visible definitions of every ticketing tool."""
         ...
 
-    async def call(self, name: str, args: Mapping[str, JsonValue]) -> ToolResult:
+    async def call(
+        self,
+        name: str,
+        args: Mapping[str, JsonValue],
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolResult:
         """Call a tool with its full MCP arguments (injected ones included for writes).
 
-        Raises `ToolTransportError` when the call could not be delivered or answered.
+        `on_progress`, when given, receives the server's progress messages for this call
+        only. Raises `ToolTransportError` when the call could not be delivered or answered.
         """
         ...
