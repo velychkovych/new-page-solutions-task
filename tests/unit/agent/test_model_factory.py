@@ -28,15 +28,21 @@ DUMMY = {
 }
 
 
-def _settings(provider: str, **extra) -> Settings:
-    return Settings(
-        _env_file=None,
-        model_provider=provider,
-        model_max_tokens=321,
-        model_timeout_s=12.5,
-        model_max_retries=4,
-        **{**DUMMY, **extra},
-    )
+@pytest.fixture
+def make_settings(tmp_path):
+    def make(provider: str, **extra) -> Settings:
+        return Settings(
+            _env_file=None,
+            model_provider=provider,
+            model_max_tokens=321,
+            model_timeout_s=12.5,
+            model_max_retries=4,
+            traces_dir=tmp_path / "traces",
+            otel_exporter_otlp_endpoint=None,
+            **{**DUMMY, **extra},
+        )
+
+    return make
 
 
 @pytest.mark.parametrize(
@@ -47,8 +53,8 @@ def _settings(provider: str, **extra) -> Settings:
         ("openai", ChatOpenAI),
     ],
 )
-def test_factory_builds_the_right_class_without_calling_it(provider, cls):
-    settings = _settings(provider, model_name="some-model-from-settings")
+def test_factory_builds_the_right_class_without_calling_it(provider, cls, make_settings):
+    settings = make_settings(provider, model_name="some-model-from-settings")
     model = build_chat_model(settings)
     assert type(model) is cls
     assert model.max_retries == 4
@@ -58,29 +64,29 @@ def test_factory_builds_the_right_class_without_calling_it(provider, cls):
     assert name == "some-model-from-settings"
 
 
-def test_factory_never_sets_temperature():
+def test_factory_never_sets_temperature(make_settings):
     for provider in ("anthropic", "bedrock", "openai"):
-        model = build_chat_model(_settings(provider))
+        model = build_chat_model(make_settings(provider))
         assert model.temperature is None, provider
         assert "temperature" not in model.model_fields_set, provider
 
 
-def test_factory_passes_timeout_and_region():
-    anthropic = build_chat_model(_settings("anthropic"))
+def test_factory_passes_timeout_and_region(make_settings):
+    anthropic = build_chat_model(make_settings("anthropic"))
     assert anthropic.default_request_timeout == 12.5
     assert anthropic.anthropic_api_key.get_secret_value() == "sk-ant-dummy"
-    bedrock = build_chat_model(_settings("bedrock"))
+    bedrock = build_chat_model(make_settings("bedrock"))
     assert bedrock.region_name == "us-east-1"
-    openai = build_chat_model(_settings("openai"))
+    openai = build_chat_model(make_settings("openai"))
     assert openai.request_timeout == 12.5
 
 
-def test_factory_requires_the_api_key():
+def test_factory_requires_the_api_key(make_settings):
     with pytest.raises(MissingSecretError, match="ANTHROPIC_API_KEY"):
-        build_chat_model(_settings("anthropic", anthropic_api_key=None))
+        build_chat_model(make_settings("anthropic", anthropic_api_key=None))
 
 
-def test_fake_provider_reads_the_script(tmp_path):
+def test_fake_provider_reads_the_script(tmp_path, make_settings):
     script = tmp_path / "script.json"
     script.write_text(
         json.dumps(
@@ -90,14 +96,14 @@ def test_fake_provider_reads_the_script(tmp_path):
             ]
         )
     )
-    model = build_chat_model(_settings("fake", fake_model_script=script))
+    model = build_chat_model(make_settings("fake", fake_model_script=script))
     assert isinstance(model, ScriptedChatModel)
     assert model.bind_tools([]) is model
 
 
-def test_fake_provider_needs_a_script():
+def test_fake_provider_needs_a_script(make_settings):
     with pytest.raises(ModelConfigError, match="FAKE_MODEL_SCRIPT"):
-        build_chat_model(_settings("fake"))
+        build_chat_model(make_settings("fake"))
 
 
 async def test_scripted_model_keeps_tool_calls_when_streamed():
@@ -129,8 +135,8 @@ DEFINITIONS = [
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "bedrock"])
-def test_prompt_caching_markers_reach_the_anthropic_payload(provider):
-    model = build_chat_model(_settings(provider))
+def test_prompt_caching_markers_reach_the_anthropic_payload(provider, make_settings):
+    model = build_chat_model(make_settings(provider))
     bound = bind_tool_definitions(model, DEFINITIONS)
     system = cacheable_system_message(system_message([]), model)
     payload = model._get_request_payload([system, HumanMessage("hi")], **bound.kwargs)
@@ -150,8 +156,8 @@ def test_prompt_caching_markers_reach_the_anthropic_payload(provider):
     assert "temperature" not in payload or payload["temperature"] is None
 
 
-def test_no_caching_markers_for_other_providers():
-    model = build_chat_model(_settings("openai"))
+def test_no_caching_markers_for_other_providers(make_settings):
+    model = build_chat_model(make_settings("openai"))
     system = system_message([])
     assert cacheable_system_message(system, model) is system
     bound = bind_tool_definitions(model, DEFINITIONS)

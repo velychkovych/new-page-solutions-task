@@ -142,6 +142,9 @@ def settings(tmp_path: Path) -> Settings:
         checkpoint_db_path=tmp_path / "checkpoints.sqlite",
         store_db_path=tmp_path / "store.sqlite",
         model_provider="fake",
+        # The app lifespan sets telemetry up: spans go under tmp_path, never ./traces or OTLP.
+        traces_dir=tmp_path / "traces",
+        otel_exporter_otlp_endpoint=None,
     )
 
 

@@ -17,8 +17,11 @@ from helpdesk.agent.tool_provider import ToolProvider
 from helpdesk.shared.api import ChatRequest, ChatResponse, HealthResponse, SessionView
 from helpdesk.shared.ids import PRINCIPAL_ID_PATTERN
 from helpdesk.shared.settings import Settings
+from helpdesk.telemetry import fastapi_telemetry_config, instrument_app, telemetry_lifespan
 
 PrincipalPath = Annotated[str, PathParam(pattern=PRINCIPAL_ID_PATTERN)]
+
+SERVICE_NAME = "agent"
 
 
 class ServiceNotReadyError(RuntimeError):
@@ -37,13 +40,20 @@ def create_app(
     tracer: Tracer | None = None,
     clock: Clock = utc_now,
 ) -> FastAPI:
-    """Tests pass a fake tool provider and model; Phase 2 passes the MCP provider."""
+    """Tests pass a fake tool provider and model; Phase 2 passes the MCP provider.
+
+    `tracer` is for tests that read spans from a private provider; without it the request
+    spans go to the process telemetry that the lifespan sets up.
+    """
     runtime = _Runtime()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # Both are async context managers: they stay open for the app's whole life.
+        # Telemetry is outermost so it is active for list_tools at startup and for every
+        # request, and is flushed only after everything else has shut down. The
+        # checkpointer and store are async context managers held for the app's whole life.
         async with (
+            telemetry_lifespan(SERVICE_NAME, settings),
             open_checkpointer(settings.checkpoint_db_path) as checkpointer,
             open_store(settings.store_db_path, fact_ttl_days=settings.fact_ttl_days) as store,
         ):
@@ -67,7 +77,11 @@ def create_app(
         return runtime.service
 
     service_dep = Depends(chat_service)
-    app = FastAPI(title="IT helpdesk agent", lifespan=lifespan)
+    app = FastAPI(
+        title="IT helpdesk agent", telemetry=fastapi_telemetry_config(), lifespan=lifespan
+    )
+    # Before the app starts: Starlette builds its middleware stack only once.
+    instrument_app(app)
 
     @app.post("/chat")
     async def chat(body: ChatRequest, service: Annotated[ChatService, service_dep]) -> ChatResponse:
