@@ -17,7 +17,7 @@ from pydantic import SecretStr
 
 from helpdesk.agent.fake_model import ScriptedChatModel, parse_script, script_position
 from helpdesk.agent.memory import REMEMBER_FACT_DEFINITION
-from helpdesk.agent.model import ModelConfigError, build_chat_model
+from helpdesk.agent.model import ModelConfigError, build_chat_model, build_judge_model
 from helpdesk.agent.prompt import system_message
 from helpdesk.agent.prompt_caching import (
     CACHE_CONTROL,
@@ -51,6 +51,10 @@ def make_settings(tmp_path):
     return make
 
 
+def _model_name(model) -> str:
+    return model.model_name if isinstance(model, ChatOpenAI) else model.model
+
+
 @pytest.mark.parametrize(
     ("provider", "cls"),
     [
@@ -66,8 +70,7 @@ def test_factory_builds_the_right_class_without_calling_it(provider, cls, make_s
     assert model.max_retries == 4
     assert model.max_tokens == 321
     # The name comes only from Settings.
-    name = model.model_name if isinstance(model, ChatOpenAI) else model.model
-    assert name == "some-model-from-settings"
+    assert _model_name(model) == "some-model-from-settings"
 
 
 def test_factory_never_sets_temperature(make_settings):
@@ -110,6 +113,62 @@ def test_fake_provider_reads_the_script(tmp_path, make_settings):
 def test_fake_provider_needs_a_script(make_settings):
     with pytest.raises(ModelConfigError, match="FAKE_MODEL_SCRIPT"):
         build_chat_model(make_settings("fake"))
+
+
+@pytest.mark.parametrize(
+    ("provider", "cls"),
+    [
+        ("anthropic", ChatAnthropic),
+        ("bedrock", ChatAnthropicBedrock),
+        ("openai", ChatOpenAI),
+    ],
+)
+def test_judge_factory_builds_the_right_class_without_calling_it(provider, cls, make_settings):
+    # The agent's provider is deliberately different: the judge reads only JUDGE_MODEL_*.
+    settings = make_settings(
+        "fake",
+        model_name="agent-model",
+        judge_model_provider=provider,
+        judge_model_name="judge-model-from-settings",
+    )
+    judge = build_judge_model(settings)
+    assert type(judge) is cls
+    assert _model_name(judge) == "judge-model-from-settings"
+    assert judge.max_tokens == 321
+    assert judge.max_retries == 4
+    assert judge.temperature is None
+    assert "temperature" not in judge.model_fields_set
+
+
+def test_judge_factory_passes_timeout_and_region(make_settings):
+    anthropic = build_judge_model(make_settings("fake", judge_model_provider="anthropic"))
+    assert anthropic.default_request_timeout == 12.5
+    bedrock = build_judge_model(make_settings("fake", judge_model_provider="bedrock"))
+    assert bedrock.region_name == "us-east-1"
+    openai = build_judge_model(make_settings("fake", judge_model_provider="openai"))
+    assert openai.request_timeout == 12.5
+
+
+def test_judge_factory_defaults_to_haiku_and_leaves_the_agent_model_alone(make_settings):
+    settings = make_settings("anthropic")
+    judge = build_judge_model(settings)
+    agent = build_chat_model(settings)
+    assert judge.model == "claude-haiku-5-5"
+    assert agent.model == "claude-sonnet-5-5"
+
+
+def test_judge_factory_requires_the_api_key(make_settings):
+    settings = make_settings("fake", judge_model_provider="anthropic", anthropic_api_key=None)
+    with pytest.raises(MissingSecretError, match="ANTHROPIC_API_KEY"):
+        build_judge_model(settings)
+
+
+def test_judge_factory_never_builds_the_agents_scripted_model(tmp_path, make_settings):
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps([{"content": "Agent reply."}]))
+    settings = make_settings("fake", fake_model_script=script, judge_model_provider="fake")
+    with pytest.raises(ModelConfigError, match="JUDGE_MODEL_PROVIDER=fake"):
+        build_judge_model(settings)
 
 
 async def test_scripted_model_keeps_tool_calls_when_streamed():
