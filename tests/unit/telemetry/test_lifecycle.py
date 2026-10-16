@@ -190,3 +190,34 @@ async def test_lifespan_releases_the_setup_when_cancelled(make_settings: Any) ->
     assert PROCESS_TRACER_PROVIDER.delegate is None
     async with telemetry_lifespan("mcp", settings) as mcp:
         assert mcp.service_name == "mcp"
+
+
+async def test_lifespan_exit_only_releases_the_setup_it_entered(make_settings: Any) -> None:
+    settings: Settings = make_settings()
+
+    async with telemetry_lifespan("agent", settings):
+        # Unbalanced: closes the lifespan's setup from inside it.
+        shutdown_telemetry()
+        mcp = setup_telemetry("mcp", settings)
+
+    # The lifespan's exit must not count against a setup it did not make.
+    assert PROCESS_TRACER_PROVIDER.delegate is mcp.provider
+    _emit("mcp-span")
+    shutdown_telemetry()
+    assert PROCESS_TRACER_PROVIDER.delegate is None
+    [record] = _records(settings.traces_dir / "mcp.jsonl")
+    assert (record["name"], record["service"]) == ("mcp-span", "mcp")
+
+
+async def test_lifespan_exit_still_releases_a_shared_same_service_setup(
+    make_settings: Any,
+) -> None:
+    settings: Settings = make_settings()
+
+    outer = setup_telemetry("agent", settings)
+    async with telemetry_lifespan("agent", settings) as inner:
+        assert inner is outer
+    # The lifespan gave back its own count only; the outer user still holds the setup.
+    assert PROCESS_TRACER_PROVIDER.delegate is outer.provider
+    shutdown_telemetry()
+    assert PROCESS_TRACER_PROVIDER.delegate is None

@@ -179,11 +179,15 @@ def setup_telemetry(service_name: str, settings: Settings | None = None) -> Tele
         return telemetry
 
 
-def _release() -> Telemetry | None:
-    """Count one shutdown; the setup to close when that was its last user."""
+def _release(entered: Telemetry | None = None) -> Telemetry | None:
+    """Count one shutdown; the setup to close when that was its last user.
+
+    With `entered`, only that setup is counted down: a lifespan whose setup was already
+    closed by an unbalanced `shutdown_telemetry()` must not close a later one.
+    """
     with _state.lock:
         active = _state.active
-        if active is None:
+        if active is None or (entered is not None and active is not entered):
             return None
         _state.users -= 1
         if _state.users > 0:
@@ -217,7 +221,7 @@ async def telemetry_lifespan(
     finally:
         # The bookkeeping happens here, synchronously, so a setup that follows straight
         # after (even if this task is cancelled mid-flush) starts a fresh provider.
-        if (released := _release()) is not None:
+        if (released := _release(telemetry)) is not None:
             await asyncio.to_thread(released.provider.shutdown)
 
 
