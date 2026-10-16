@@ -30,7 +30,13 @@ from langchain_mcp_adapters.sessions import (
 )
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.session import ProgressFnT
-from mcp.types import CallToolResult, TextContent
+from mcp.types import (
+    CallToolRequest,
+    CallToolRequestParams,
+    CallToolResult,
+    ClientRequest,
+    TextContent,
+)
 from pydantic import JsonValue
 
 from helpdesk.agent.tool_provider import (
@@ -131,6 +137,10 @@ class McpToolProvider:
             # Connect, write and pool, and also each read of the SSE response stream.
             timeout=self._timeout,
             sse_read_timeout=self._timeout,
+            # Every request of the session, initialize and tools/list included. httpx's
+            # read timeout does not end a request whose SSE response has started: the mcp
+            # transport swallows that error and the request would wait forever.
+            session_kwargs={"read_timeout_seconds": self._timeout},
         )
         if httpx_client_factory is not None:
             connection["httpx_client_factory"] = httpx_client_factory
@@ -166,12 +176,18 @@ class McpToolProvider:
         try:
             async with create_session(self._connection) as session:
                 await session.initialize()
-                result = await session.call_tool(
-                    name,
-                    dict(args),
-                    # Bounds the whole call, also when the server keeps the stream open
-                    # without answering (an httpx read timeout alone ends it silently).
-                    read_timeout_seconds=self._timeout,
+                # Not `session.call_tool`: on a fresh session it follows every result
+                # with a tools/list (to validate structured output, which no tool here
+                # has). A failure of that extra request would report a committed write as
+                # unconfirmed, so tools/call is the last request sent.
+                result = await session.send_request(
+                    ClientRequest(
+                        CallToolRequest(
+                            params=CallToolRequestParams(name=name, arguments=dict(args))
+                        )
+                    ),
+                    CallToolResult,
+                    request_read_timeout_seconds=self._timeout,
                     progress_callback=None
                     if on_progress is None
                     else _progress_forwarder(on_progress),

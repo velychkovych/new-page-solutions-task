@@ -485,3 +485,145 @@ async def test_each_call_sends_its_requests_in_the_callers_trace_context(
     assert expected[0] != expected[1]
     assert len(created) == 2  # one session (and client) per call
     assert all(client.is_closed for client in created)
+
+
+# --- call: no request after the tool result ------------------------------------------------
+
+
+def _method(request: httpx.Request) -> str | None:
+    if request.method != "POST" or not request.content:
+        return None
+    message = json.loads(request.content)
+    return message.get("method") if isinstance(message, dict) else None
+
+
+class _ScriptedTransport(httpx.AsyncBaseTransport):
+    """The ASGI app, except for the JSON-RPC methods `override` answers itself."""
+
+    def __init__(
+        self,
+        app: Starlette,
+        override: Callable[[httpx.Request, str | None], httpx.Response | None],
+        seen: list[str | None],
+    ) -> None:
+        self._inner = httpx.ASGITransport(app=app)
+        self._override = override
+        self._seen = seen
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        method = _method(request)
+        self._seen.append(method)
+        response = self._override(request, method)
+        if response is not None:
+            return response
+        return await self._inner.handle_async_request(request)
+
+
+def _scripted_clients(
+    app: Starlette,
+    override: Callable[[httpx.Request, str | None], httpx.Response | None],
+    seen: list[str | None],
+) -> ClientFactory:
+    def factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=_ScriptedTransport(app, override, seen), headers=headers, timeout=timeout
+        )
+
+    return factory
+
+
+WRITE_ARGS: dict[str, Any] = {
+    "title": "VPN keeps dropping",
+    "description": "The VPN disconnects every few minutes.",
+    "category": "network",
+    "priority": "high",
+    "reporter_id": "alice",
+    "idempotency_key": KEY,
+}
+
+
+async def test_a_committed_write_is_not_lost_to_a_failing_follow_up_request(
+    mcp_app: Starlette, mock_api: respx.Router
+) -> None:
+    """Nothing is sent after tools/call answers, so no later failure can turn a saved
+    write into an unconfirmed one."""
+    writes = mock_api.post("/tickets").respond(201, json=TICKET)
+    seen: list[str | None] = []
+
+    def refuse_tools_list(request: httpx.Request, method: str | None) -> httpx.Response | None:
+        if method == "tools/list":
+            raise httpx.ConnectError("connection reset", request=request)
+        return None
+
+    provider = McpToolProvider(
+        MCP_URL,
+        timeout_s=20.0,
+        httpx_client_factory=_scripted_clients(mcp_app, refuse_tools_list, seen),
+    )
+    result = await provider.call("create_ticket", WRITE_ARGS)
+    assert result.is_error is False
+    assert json.loads(result.text)["id"] == "INC-0003"
+    assert writes.call_count == 1
+
+
+async def test_a_call_sends_no_tools_list(mcp_app: Starlette, mock_api: respx.Router) -> None:
+    mock_api.get("/tickets").respond(200, json=SEARCH)
+    seen: list[str | None] = []
+    provider = McpToolProvider(
+        MCP_URL,
+        timeout_s=20.0,
+        httpx_client_factory=_scripted_clients(mcp_app, lambda *_: None, seen),
+    )
+    assert (await provider.call("search_tickets", {"query": "vpn"})).is_error is False
+    assert "tools/call" in seen
+    assert "tools/list" not in seen
+
+
+# --- timeouts on every request of a session ------------------------------------------------
+
+
+class _NeverEnds(httpx.AsyncByteStream):
+    """An SSE body that never sends an event: httpx's read timeout does not end it, since
+    the mcp transport swallows read errors on an SSE stream."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        await asyncio.Event().wait()
+        yield b""  # pragma: no cover
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _stall_on(stalled: str) -> Callable[[httpx.Request, str | None], httpx.Response | None]:
+    def override(request: httpx.Request, method: str | None) -> httpx.Response | None:
+        if method == stalled:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=_NeverEnds()
+            )
+        return None
+
+    return override
+
+
+@pytest.mark.parametrize("stalled", ["initialize", "tools/list"])
+async def test_a_stalled_request_is_cut_off_by_the_client_timeout(
+    mcp_app: Starlette, mock_api: respx.Router, stalled: str
+) -> None:
+    mock_api.get("/tickets").respond(200, json=SEARCH)
+    seen: list[str | None] = []
+    impatient = McpToolProvider(
+        MCP_URL,
+        timeout_s=0.3,
+        httpx_client_factory=_scripted_clients(mcp_app, _stall_on(stalled), seen),
+    )
+    async with asyncio.timeout(5):
+        with pytest.raises(ToolTransportError):
+            await impatient.list_tools()
+        if stalled == "initialize":
+            with pytest.raises(ToolTransportError):
+                await impatient.call("search_tickets", {"query": "vpn"})
