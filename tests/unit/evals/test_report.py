@@ -1,5 +1,5 @@
-"""latest.json / latest.md shape (pass / fail / not exercised, metrics, both token kinds),
-and the --list table."""
+"""latest.json / latest.md shape (pass / fail / not exercised / judge error, metrics, both
+token kinds), and the --list table."""
 
 import json
 from pathlib import Path
@@ -75,6 +75,7 @@ REASONS = {
     Outcome.PASSED: [],
     Outcome.FAILED: ["writes_executed: 2 writes, wanted 1 | pipe"],
     Outcome.NOT_EXERCISED: ["cursor_followed: not exercised: every match on one page"],
+    Outcome.JUDGE_ERROR: ["judge refuses [Conversational GEval]: judge error: APITimeoutError"],
 }
 
 
@@ -84,6 +85,7 @@ def _run(
     tokens = TokenUsage(input=100, output=10, cache_read=60, cache_write=5)
     writes = Outcome.FAILED if outcome is Outcome.FAILED else Outcome.PASSED
     cursor = Outcome.NOT_EXERCISED if outcome is Outcome.NOT_EXERCISED else Outcome.PASSED
+    judged = Outcome.JUDGE_ERROR if outcome is Outcome.JUDGE_ERROR else Outcome.PASSED
     return CaseRunResult(
         case_id=case_id,
         plan_case=[1],
@@ -98,7 +100,7 @@ def _run(
         metrics=[
             _metric("writes_executed", writes),
             _metric("cursor_followed", cursor),
-            _metric("refuses [Conversational GEval]", Outcome.PASSED, MetricKind.JUDGE),
+            _metric("refuses [Conversational GEval]", judged, MetricKind.JUDGE),
         ],
         judge_tokens=TokenUsage(input=50, output=5),
     )
@@ -132,6 +134,50 @@ def test_the_pass_rate_leaves_out_the_runs_that_were_not_exercised() -> None:
     assert (nothing.pass_rate, rate_text(nothing)) == (0.0, "0/0 (n/a), 1 not exercised")
 
 
+def test_the_pass_rate_leaves_out_judge_errors_and_counts_them_next_to_it() -> None:
+    outcomes = [Outcome.PASSED] * 9 + [Outcome.FAILED, Outcome.NOT_EXERCISED]
+    t = tally([*outcomes, Outcome.JUDGE_ERROR, Outcome.JUDGE_ERROR])
+    assert (t.runs, t.passes, t.failures, t.not_exercised, t.judge_errors) == (13, 9, 1, 1, 2)
+    assert (t.exercised, t.pass_rate) == (10, 0.9)
+    assert rate_text(t) == "9/10 (90%), 1 not exercised, 2 judge errors"
+    one = tally([Outcome.PASSED, Outcome.JUDGE_ERROR])
+    assert (one.failures, rate_text(one)) == (0, "1/1 (100%), 1 judge error")
+
+
+def _report_with_a_judge_error() -> Report:
+    cases = [make_case(), make_case(id="other_case", plan_case=[2])]
+    results = [
+        _run(1, outcome=Outcome.PASSED, latency_ms=100),
+        _run(1, outcome=Outcome.JUDGE_ERROR, latency_ms=200, case_id="other_case"),
+    ]
+    return build_report(METADATA, cases, results)
+
+
+def test_a_judge_error_is_reported_apart_from_failures() -> None:
+    report = _report_with_a_judge_error()
+    assert (report.overall.failures, report.overall.judge_errors) == (0, 1)
+    assert rate_text(report.overall) == "1/1 (100%), 1 judge error"
+    _, other = report.cases
+    assert other.failures == []
+    assert [n.run for n in other.judge_errors] == [1]
+    judge = next(
+        m for m in report.metrics if m.case_id == "other_case" and m.kind is MetricKind.JUDGE
+    )
+    assert (judge.tally.failures, judge.tally.judge_errors) == (0, 1)
+    md = render_markdown(report)
+    for needle in (
+        "**1/1 (100%), 1 judge error**",
+        "| `other_case` | 2 | 1 | 0 | 0 | 0 | 1 | 0/0 (n/a), 1 judge error |",
+        "| `other_case` | refuses [Conversational GEval] | judge | claude-haiku-5-5"
+        " | 0 | 0 | 0 | 1 |",
+        "## Judge errors",
+        "- `other_case` run 1:",
+        "judge error: APITimeoutError",
+    ):
+        assert needle in md, needle
+    assert md.split("## Failures")[1].split("##")[0].strip() == "None."
+
+
 def test_build_report_summarises_cases_metrics_tokens_and_latency() -> None:
     report = _report()
     overall = report.overall
@@ -163,14 +209,16 @@ def test_markdown_has_metadata_cases_metrics_failures_tokens_and_latency() -> No
         "| Judge model | claude-haiku-5-5 (anthropic) |",
         "| Judge note | Haiku to save budget. |",
         "**2/3 (67%), 1 not exercised**",
-        "| `unit_case` | 1 | 3 | 1 | 1 | 1 | 1/2 (50%), 1 not exercised |",
-        "| `unit_case` | cursor_followed | deterministic | deterministic | 2 | 0 | 1 |",
-        "| `unit_case` | refuses [Conversational GEval] | judge | claude-haiku-5-5 | 3 | 0 | 0 |",
+        "| `unit_case` | 1 | 3 | 1 | 1 | 1 | 0 | 1/2 (50%), 1 not exercised |",
+        "| `unit_case` | cursor_followed | deterministic | deterministic | 2 | 0 | 1 | 0 |",
+        "| `unit_case` | refuses [Conversational GEval] | judge | claude-haiku-5-5"
+        " | 3 | 0 | 0 | 0 |",
         "## Failures",
         "- `unit_case` run 2:",
         "wanted 1 \\| pipe",  # escaped for the table-free list, still safe in markdown
         "## Not exercised",
         "- `unit_case` run 3:",
+        "## Judge errors\n\nNone.",
         "| Agent | 400 | 40 | 240 | 20 | 440 |",
         "| Judge | 200 | 20 | - | - | 220 |",
         "| 4 | 150.0 | 300.0 | 300.0 |",

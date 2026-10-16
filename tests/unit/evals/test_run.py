@@ -67,7 +67,7 @@ def test_an_unknown_case_id_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert "unknown case id" in capsys.readouterr().err
 
 
-def _report(outcome: Outcome) -> Report:
+def _report(*outcomes: Outcome) -> Report:
     metadata = RunMetadata(
         started_at="s",
         finished_at="f",
@@ -81,20 +81,23 @@ def _report(outcome: Outcome) -> Report:
         chaos_only=False,
         case_filter=[],
     )
-    result = CaseRunResult(
-        case_id="unit_case",
-        plan_case=[1],
-        run=1,
-        outcome=outcome,
-        reasons=[] if outcome is Outcome.PASSED else ["x"],
-        turns=[],
-        duration_s=0.1,
-        tokens=TokenUsage(input=7, output=3),
-        models=[],
-        providers=[],
-        judge_tokens=TokenUsage(input=20, output=2),
-    )
-    return build_report(metadata, [make_case()], [result])
+    results = [
+        CaseRunResult(
+            case_id="unit_case",
+            plan_case=[1],
+            run=run,
+            outcome=outcome,
+            reasons=[] if outcome is Outcome.PASSED else ["x"],
+            turns=[],
+            duration_s=0.1,
+            tokens=TokenUsage(input=7, output=3),
+            models=[],
+            providers=[],
+            judge_tokens=TokenUsage(input=20, output=2),
+        )
+        for run, outcome in enumerate(outcomes, start=1)
+    ]
+    return build_report(metadata, [make_case()], results)
 
 
 @pytest.mark.parametrize(
@@ -104,6 +107,8 @@ def _report(outcome: Outcome) -> Report:
         (Outcome.FAILED, EXIT_FAILED, "Pass rate: 0/1 (0%)"),
         # Not exercised is not a failure, and the pass rate says so.
         (Outcome.NOT_EXERCISED, EXIT_OK, "Pass rate: 0/0 (n/a), 1 not exercised"),
+        # Nor is a judge error, but the run was not fully scored: no pass either.
+        (Outcome.JUDGE_ERROR, EXIT_INFRA, "Pass rate: 0/0 (n/a), 1 judge error"),
     ],
 )
 def test_exit_code_follows_the_runs_and_results_are_written_either_way(
@@ -126,6 +131,31 @@ def test_exit_code_follows_the_runs_and_results_are_written_either_way(
     assert "Tokens: 10 (input 7, output 3" in out
     assert "Judge tokens: 22 (input 20, output 2)" in out
     assert "Model: - (provider: scriptedchatmodel)" in out
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "code"),
+    [
+        # A failed run is the agent's failure, whatever the judge did on another run.
+        ((Outcome.FAILED, Outcome.JUDGE_ERROR), EXIT_FAILED),
+        ((Outcome.PASSED, Outcome.JUDGE_ERROR, Outcome.NOT_EXERCISED), EXIT_INFRA),
+    ],
+)
+def test_a_failure_wins_over_judge_errors_and_judge_errors_are_not_a_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    outcomes: tuple[Outcome, ...],
+    code: int,
+) -> None:
+    async def fake_evaluate(*_: Any, **__: Any) -> Report:
+        return _report(*outcomes)
+
+    monkeypatch.setattr(run_module, "evaluate_cases", fake_evaluate)
+    assert main(["--fake", "--case", "status_question", "--out", str(tmp_path)]) == code
+    assert (tmp_path / "latest.md").exists()
+    err = capsys.readouterr().err
+    assert ("judge errors: 1 run(s) could not be fully scored" in err) is (code == EXIT_INFRA)
 
 
 def test_the_live_tier_needs_the_judge_before_any_run(

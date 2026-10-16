@@ -12,10 +12,13 @@ results.
 
 The runs are collected first; then every run is scored through DeepEval (evals.scoring).
 
-Exit status: 0 no run failed (a run that was not exercised does not fail), 1 a run failed
-(results are written either way),
-2 an infrastructure error (stack not reachable, a command failed) or bad arguments. An
-infrastructure error after some runs finished still writes their results, marked aborted.
+Exit status (results are written for 0, 1 and a judge error's 2):
+0 every run passed or was not exercised;
+1 a run failed (a failed check fails its run even when a judge metric could not be scored);
+2 an infrastructure error (stack not reachable, a command failed) or bad arguments; an
+  infrastructure error after some runs finished still writes their results, marked
+  aborted. Also 2 when no run failed but a run is a judge error (a judge metric could not
+  be scored): the judge is infrastructure too, and the run cannot be called a pass;
 143 terminated by SIGTERM, after cleaning up the stack; nothing is written.
 """
 
@@ -146,7 +149,12 @@ async def run_cases(
                 )
 
 
-VERDICTS = {Outcome.PASSED: "PASS", Outcome.FAILED: "FAIL", Outcome.NOT_EXERCISED: "NOT EXERCISED"}
+VERDICTS = {
+    Outcome.PASSED: "PASS",
+    Outcome.FAILED: "FAIL",
+    Outcome.NOT_EXERCISED: "NOT EXERCISED",
+    Outcome.JUDGE_ERROR: "JUDGE ERROR",
+}
 
 
 def report_verdicts(results: Sequence[CaseRunResult], progress: Progress) -> None:
@@ -316,10 +324,24 @@ def run_and_report(
     write_report(report, args.out)
     for line in summary_lines(report, args.out):
         print(line)
+    return exit_code(report)
+
+
+def exit_code(report: Report) -> int:
+    overall = report.overall
     if report.metadata.aborted is not None:
         print(f"aborted: {report.metadata.aborted}", file=sys.stderr)
         return EXIT_INFRA
-    return EXIT_OK if report.overall.failures == 0 else EXIT_FAILED
+    if overall.failures:
+        return EXIT_FAILED
+    if overall.judge_errors:
+        print(
+            f"judge errors: {overall.judge_errors} run(s) could not be fully scored (see"
+            " latest.md); no run failed",
+            file=sys.stderr,
+        )
+        return EXIT_INFRA
+    return EXIT_OK
 
 
 if __name__ == "__main__":

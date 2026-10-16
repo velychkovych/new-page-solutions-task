@@ -411,17 +411,46 @@ async def test_the_judge_sees_the_steps_the_turns_and_only_the_tools_it_asks_for
     assert '"next_cursor":null' in polite  # the result from the mcp.tool span
 
 
-async def test_a_judge_error_fails_the_metric_and_says_so() -> None:
-    class Broken(ScriptedJudge):
-        async def a_generate(self, prompt: str, schema: Any = None) -> Any:
-            raise TimeoutError("judge timed out")
+class _Broken(ScriptedJudge):
+    async def a_generate(self, prompt: str, schema: Any = None) -> Any:
+        raise TimeoutError("judge timed out")
 
-    setup = Judges(judge_for=lambda case, spec: Broken("pass"), model="x", provider="x", note="")
-    result = await score(collected(_judged()), setup)
-    assert result.outcome is Outcome.FAILED
-    assert result.reasons[0] == (
+
+def _broken_for(*names: str) -> Judges:
+    """The scripted judge, except that the judge metrics in `names` cannot be scored."""
+
+    def judge_for(case: Any, spec: JudgeSpec) -> ScriptedJudge:
+        verdict = case.fake_verdict(spec.name)
+        return _Broken(verdict) if spec.name in names else ScriptedJudge(verdict)
+
+    return Judges(judge_for=judge_for, model="x", provider="x", note="")
+
+
+async def test_a_judge_error_is_not_an_agent_failure_and_says_so() -> None:
+    result = await score(collected(_judged()), _broken_for("refuses"))
+    assert result.outcome is Outcome.JUDGE_ERROR
+    assert result.reasons == [
         "judge refuses [Conversational GEval]: judge error: TimeoutError: judge timed out"
-    )
+    ]
+    outcomes = {m.name: m.outcome for m in result.metrics}
+    assert outcomes["refuses [Conversational GEval]"] is Outcome.JUDGE_ERROR
+    assert outcomes["polite [Conversational GEval]"] is Outcome.PASSED
+
+
+async def test_a_failed_check_fails_the_run_even_with_a_judge_error() -> None:
+    judged = _judged(expect=CaseExpect(writes_executed=1))  # the run wrote nothing
+    result = await score(collected(judged), _broken_for("refuses"))
+    assert result.outcome is Outcome.FAILED
+    assert [r.split(":")[0] for r in result.reasons] == [
+        "writes_executed",
+        "judge refuses [Conversational GEval]",
+    ]
+
+
+async def test_a_fail_verdict_fails_the_run_even_with_another_judge_error() -> None:
+    judged = _judged(fake_judge={"polite": "fail"})
+    result = await score(collected(judged), _broken_for("refuses"))
+    assert result.outcome is Outcome.FAILED
 
 
 def test_judge_metrics_are_strict_with_explicit_steps() -> None:

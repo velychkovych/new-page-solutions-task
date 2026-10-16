@@ -1,12 +1,13 @@
 """latest.json and latest.md: run metadata, pass rate per case and per metric, tokens and
 latency.
 
-A run passes, fails, or is not exercised (it never reached what a check is about). The
-pass rate is over the exercised runs, with the not-exercised count next to it.
+A run passes, fails, is not exercised (it never reached what a check is about), or is a
+judge error (no check failed, but a judge metric could not be scored). The pass rate is
+over the other runs, with the not-exercised and judge-error counts next to it.
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -56,12 +57,14 @@ class Tally(_Model):
     passes: int
     failures: int
     not_exercised: int
-    # passes / (runs - not_exercised); 0 when no run was exercised.
+    judge_errors: int
+    # passes / (runs - not_exercised - judge_errors); 0 when no run is left.
     pass_rate: float
 
     @property
     def exercised(self) -> int:
-        return self.runs - self.not_exercised
+        """The runs that were exercised and fully scored: the pass rate's denominator."""
+        return self.runs - self.not_exercised - self.judge_errors
 
 
 class CaseSummary(_Model):
@@ -71,6 +74,7 @@ class CaseSummary(_Model):
     tally: Tally
     failures: list[RunNote]
     not_exercised: list[RunNote]
+    judge_errors: list[RunNote]
 
 
 class MetricSummary(_Model):
@@ -119,12 +123,14 @@ def percentile(values: Sequence[float], pct: float) -> float:
 def tally(outcomes: Sequence[Outcome]) -> Tally:
     passes = sum(outcome is Outcome.PASSED for outcome in outcomes)
     skipped = sum(outcome is Outcome.NOT_EXERCISED for outcome in outcomes)
-    exercised = len(outcomes) - skipped
+    unscored = sum(outcome is Outcome.JUDGE_ERROR for outcome in outcomes)
+    exercised = len(outcomes) - skipped - unscored
     return Tally(
         runs=len(outcomes),
         passes=passes,
         failures=exercised - passes,
         not_exercised=skipped,
+        judge_errors=unscored,
         pass_rate=round(passes / exercised, 3) if exercised else 0.0,
     )
 
@@ -165,6 +171,7 @@ def build_report(
                 tally=tally([r.outcome for r in runs]),
                 failures=_notes(runs, Outcome.FAILED),
                 not_exercised=_notes(runs, Outcome.NOT_EXERCISED),
+                judge_errors=_notes(runs, Outcome.JUDGE_ERROR),
             )
         )
         metrics += _metric_summaries(case, runs)
@@ -201,15 +208,21 @@ def md_cell(text: str) -> str:
 
 
 def rate_text(t: Tally) -> str:
-    """`passes/exercised (rate)`, with the not-exercised runs next to it."""
+    """`passes/exercised (rate)`, with the not-exercised runs and judge errors next to it."""
     rate = f"{t.pass_rate * 100:.0f}%" if t.exercised else "n/a"
-    text = f"{t.passes}/{t.exercised} ({rate})"
-    return f"{text}, {t.not_exercised} not exercised" if t.not_exercised else text
+    parts = [f"{t.passes}/{t.exercised} ({rate})"]
+    if t.not_exercised:
+        parts.append(f"{t.not_exercised} not exercised")
+    if t.judge_errors:
+        parts.append(f"{t.judge_errors} judge error{'s' if t.judge_errors != 1 else ''}")
+    return ", ".join(parts)
 
 
-def _run_notes(title: str, cases: Sequence[CaseSummary], *, failures: bool) -> list[str]:
+def _run_notes(
+    title: str, cases: Sequence[CaseSummary], pick: Callable[[CaseSummary], list[RunNote]]
+) -> list[str]:
     lines = ["", f"## {title}", ""]
-    listed = [(c, c.failures if failures else c.not_exercised) for c in cases]
+    listed = [(c, pick(c)) for c in cases]
     if not any(notes for _, notes in listed):
         return [*lines, "None."]
     for case, notes in listed:
@@ -248,17 +261,20 @@ def render_markdown(report: Report) -> str:
         f"| Case filter | {', '.join(meta.case_filter) or 'all'} |",
         f"| **Overall pass rate** | **{rate_text(report.overall)}** |",
         "",
-        "Runs pass, fail, or are not exercised: the run never reached what a check is",
-        "about. The pass rate is over the exercised runs.",
+        "Runs pass, fail, are not exercised (the run never reached what a check is about),",
+        "or are judge errors (no check failed, but a judge metric could not be scored: an API",
+        "error after the SDK's retries, or no verdict in its answer). A failed check always",
+        "fails the run. The pass rate leaves out the not-exercised runs and the judge errors.",
         "",
         "## Cases",
         "",
-        "| Case | PLAN # | Runs | Passes | Failures | Not exercised | Pass rate |",
-        "|---|---|---|---|---|---|---|",
+        "| Case | PLAN # | Runs | Passes | Failures | Not exercised | Judge errors | Pass rate |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     lines += [
         f"| `{c.id}` | {', '.join(map(str, c.plan_case))} | {c.tally.runs} | {c.tally.passes}"
-        f" | {c.tally.failures} | {c.tally.not_exercised} | {rate_text(c.tally)} |"
+        f" | {c.tally.failures} | {c.tally.not_exercised} | {c.tally.judge_errors}"
+        f" | {rate_text(c.tally)} |"
         for c in report.cases
     ]
     lines += [
@@ -268,16 +284,19 @@ def render_markdown(report: Report) -> str:
         "Deterministic metrics run the checks in `evals/checks.py` on the trace evidence;",
         "judge metrics (`ConversationalGEval`, strict) grade only what a reply means.",
         "",
-        "| Case | Metric | Kind | Evaluated by | Passes | Failures | Not exercised |",
-        "|---|---|---|---|---|---|---|",
+        "| Case | Metric | Kind | Evaluated by | Passes | Failures | Not exercised"
+        " | Judge errors |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     lines += [
         f"| `{m.case_id}` | {md_cell(m.name)} | {m.kind.value} | {m.evaluation_model or '-'}"
-        f" | {m.tally.passes} | {m.tally.failures} | {m.tally.not_exercised} |"
+        f" | {m.tally.passes} | {m.tally.failures} | {m.tally.not_exercised}"
+        f" | {m.tally.judge_errors} |"
         for m in report.metrics
     ]
-    lines += _run_notes("Failures", report.cases, failures=True)
-    lines += _run_notes("Not exercised", report.cases, failures=False)
+    lines += _run_notes("Failures", report.cases, lambda c: c.failures)
+    lines += _run_notes("Not exercised", report.cases, lambda c: c.not_exercised)
+    lines += _run_notes("Judge errors", report.cases, lambda c: c.judge_errors)
     tokens = report.tokens
     judge = report.judge_tokens
     latency = report.latency

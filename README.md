@@ -320,15 +320,22 @@ flowchart TD
   - every inherited `DEEPEVAL_*` / `CONFIDENT_*` variable removed (no Confident AI upload)
   - `make test` disables the pytest plugins deepeval installs (`-p no:deepeval`, `no:xdist`,
     `no:xdist.looponfail`, `no:repeat`, `no:rerunfailures`)
-- A run passes, fails, or is not exercised (it never reached what a check is about; today
-  only `cursor_followed`, when no successful search returned a `next_cursor`). The pass rate
-  is over exercised runs, with the not-exercised count next to it (`evals/report.py`).
+- A run passes, fails, is not exercised (it never reached what a check is about; today
+  only `cursor_followed`, when no successful search returned a `next_cursor`), or is a
+  judge error (no check failed, but a judge metric could not be scored: an API error after
+  the SDK's retries, or no verdict in the answer). A failed check, deterministic or judge,
+  always fails the run. The pass rate leaves out not-exercised runs and judge errors, with
+  both counts next to it, e.g. `9/10 (90%), 1 not exercised, 2 judge errors`
+  (`evals/scoring.py`, `evals/report.py`).
 - Results: `evals/results/latest.md` and `evals/results/latest.json` (live tier). Agent
   tokens (LLM spans) and judge tokens (DeepEval metric data) are reported separately; the
   judge model and provider are in the run metadata.
-- Exit status: 0 no run failed (a not-exercised run does not fail), 1 a run failed, 2
-  infrastructure error, bad arguments or a judge model that cannot be built, 143 SIGTERM
-  (`evals/run.py`).
+- Exit status (`evals/run.py`):
+  - 0: every run passed or was not exercised
+  - 1: a run failed (also when other runs are judge errors)
+  - 2: infrastructure error, bad arguments, a judge model that cannot be built, or no run
+    failed but at least one is a judge error (results are still written)
+  - 143: SIGTERM
 - The fake tier is part of `make test`: `tests/integration/evals/test_fake_tier.py` runs every
   case with its fake script and scripted judge, scored through DeepEval.
 

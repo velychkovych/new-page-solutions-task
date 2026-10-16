@@ -31,8 +31,11 @@ JUDGE_CONCURRENCY = 4
 
 
 def _outcome(metric: BaseConversationalMetric) -> Outcome:
-    if isinstance(metric, ExpectationMetric) and metric.not_exercised is not None:
-        return Outcome.NOT_EXERCISED
+    if isinstance(metric, ExpectationMetric):
+        if metric.not_exercised is not None:
+            return Outcome.NOT_EXERCISED
+    elif metric.error is not None:
+        return Outcome.JUDGE_ERROR
     return Outcome.PASSED if metric.is_successful() else Outcome.FAILED
 
 
@@ -60,8 +63,10 @@ def _reasons(metric: BaseConversationalMetric, result: MetricResult) -> list[str
         if metric.not_exercised is not None:
             return [f"{result.name}: {metric.not_exercised}"]
         return metric.failures if result.outcome is Outcome.FAILED else []
+    if result.outcome is Outcome.JUDGE_ERROR:
+        return [f"judge {result.name}: {result.error}"]
     if result.outcome is Outcome.FAILED:
-        return [f"judge {result.name}: {result.error or result.reason}"]
+        return [f"judge {result.name}: {result.reason}"]
     return []
 
 
@@ -73,7 +78,8 @@ async def _measure_judge(
             await metric.a_measure(test_case, _show_indicator=False)
         except Exception as exc:
             # The judge failed (API error after the SDK's retries, an answer without the
-            # schema); the metric fails and says so, instead of ending the whole run.
+            # schema): the metric is a judge error and says so, instead of ending the whole
+            # run.
             if isinstance(exc, JudgeError):
                 # A call that answered unusably was still paid for; DeepEval only counts
                 # the tokens of a call that returns.
@@ -83,10 +89,14 @@ async def _measure_judge(
 
 
 def _run_outcome(metrics: Sequence[MetricResult]) -> Outcome:
+    """A failed metric fails the run, whatever else happened: a judge that could not be
+    scored never hides a check that failed. A judge error comes before not exercised, as
+    the run that has both was not fully scored."""
     outcomes = {metric.outcome for metric in metrics}
-    if Outcome.FAILED in outcomes:
-        return Outcome.FAILED
-    return Outcome.NOT_EXERCISED if Outcome.NOT_EXERCISED in outcomes else Outcome.PASSED
+    for outcome in (Outcome.FAILED, Outcome.JUDGE_ERROR, Outcome.NOT_EXERCISED):
+        if outcome in outcomes:
+            return outcome
+    return Outcome.PASSED
 
 
 def _unscored(collected: CollectedRun, error: str) -> CaseRunResult:

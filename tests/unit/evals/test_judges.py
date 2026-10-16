@@ -181,7 +181,7 @@ async def test_the_tokens_of_a_failed_judge_call_still_reach_the_report() -> Non
     judge = LangChainJudge(fake, "m")
     setup = Judges(judge_for=lambda case, spec: judge, model="m", provider="a", note="")
     result = await score(_judged_run(), setup)
-    assert result.outcome is Outcome.FAILED
+    assert result.outcome is Outcome.JUDGE_ERROR
     (metric,) = result.metrics
     assert metric.error is not None
     assert metric.error.startswith("judge error: JudgeError")
@@ -233,7 +233,7 @@ async def test_deepeval_adds_no_retry_around_the_judge() -> None:
 
     setup = Judges(judge_for=lambda case, spec: Failing("pass"), model="m", provider="a", note="")
     result = await score(_judged_run(), setup)
-    assert result.outcome is Outcome.FAILED
+    assert result.outcome is Outcome.JUDGE_ERROR
     # The Anthropic SDK's own retries (MODEL_MAX_RETRIES) are the only retry layer.
     assert len(calls) == 1
 

@@ -20,6 +20,10 @@ class Outcome(StrEnum):
     # returned a next page, so there was no cursor to follow). It neither passes nor
     # fails, and the pass rate leaves it out.
     NOT_EXERCISED = "not_exercised"
+    # A judge metric could not be scored (its API call failed after the SDK's retries, or
+    # its answer held no verdict): that says nothing about the agent. A run gets this
+    # outcome only when no deterministic check failed; the pass rate leaves it out too.
+    JUDGE_ERROR = "judge_error"
 
 
 class MetricKind(StrEnum):
@@ -61,7 +65,7 @@ class CaseRunResult(_Model):
     run: int
     outcome: Outcome
     # Every failed check's reason (the deterministic checks' own text, then the judges'),
-    # then what was not exercised.
+    # then what was not exercised, each judge error among the judges'.
     reasons: list[str]
     turns: list[TurnResult]
     duration_s: float
