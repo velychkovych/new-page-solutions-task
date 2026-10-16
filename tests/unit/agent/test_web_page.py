@@ -41,6 +41,14 @@ async def test_index_is_the_page_with_an_empty_jaeger_meta_when_unset(
     assert _jaeger_metas(response.text) == [""]
 
 
+async def test_index_is_not_cached(make_client, provider, fake_model):
+    client = await make_client(fake_model(responses=[]), provider, web_dir=WEB_DIR)
+
+    response = await client.get("/")
+
+    assert response.headers["cache-control"] == "no-cache"
+
+
 async def test_index_fills_the_jaeger_meta_from_settings(make_client, provider, fake_model):
     client = await make_client(
         fake_model(responses=[]),
@@ -127,3 +135,36 @@ async def test_a_missing_page_is_404(make_client, provider, fake_model, tmp_path
     client = await make_client(fake_model(responses=[]), provider, web_dir=tmp_path / "nowhere")
 
     assert (await client.get("/")).status_code == 404
+
+
+def _web_dir_with(tmp_path: Path, page: str) -> Path:
+    web = tmp_path / "web"
+    (web / "fixtures").mkdir(parents=True)
+    (web / "index.html").write_text(page, encoding="utf-8")
+    return web
+
+
+@pytest.mark.parametrize("metas", [0, 2], ids=["no-meta", "two-metas"])
+async def test_a_page_without_exactly_one_jaeger_meta_is_404(
+    make_client, provider, fake_model, tmp_path, metas
+):
+    page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    page = page.replace(JAEGER_META, JAEGER_META * metas)
+    assert page.count(JAEGER_META) == metas
+    web = _web_dir_with(tmp_path, page)
+    client = await make_client(
+        fake_model(responses=[]), provider, web_dir=web, jaeger_ui_url="http://jaeger/"
+    )
+
+    assert (await client.get("/")).status_code == 404
+
+
+@pytest.mark.parametrize("name", ["propose.sse.bak", "x.json.bak", "fallback.json~"])
+async def test_a_real_file_with_a_disallowed_name_is_404(
+    make_client, provider, fake_model, tmp_path, name
+):
+    web = _web_dir_with(tmp_path, (WEB_DIR / "index.html").read_text(encoding="utf-8"))
+    (web / "fixtures" / name).write_text("{}")
+    client = await make_client(fake_model(responses=[]), provider, web_dir=web)
+
+    assert (await client.get(f"/fixtures/{name}")).status_code == 404
