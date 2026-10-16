@@ -599,3 +599,234 @@ Notable fixes made after review:
    - A mock test reads two FastAPI 0.143 internals.
 6. **Phase 2 in-process tests** cannot run the lifespans of two different services at the
    same time (one service per process, by design).
+
+---
+
+## 2026-10-16 — Phase 2 (integration)
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- Two workflows, 15 agents in total:
+  1. **Build:** three agents, one after the other on `master`. Each built against
+     `docs/CONTRACTS.md`, committed per step and passed `make lint typecheck test` before the
+     next one started:
+     - MCP provider, entry point and tracing;
+     - `/chat/stream` and serving `web/`;
+     - the e2e stack and tests, run against Docker.
+  2. **Review:** five reviewers, each in its own git worktree, with one lens each: contract,
+     CLAUDE.md rules and security, streaming and concurrency, the MCP provider, and tests
+     (mutation probes). An adversarial verifier then checked each reviewer's findings. One
+     fixer applied the confirmed findings on `master` and an independent rechecker checked
+     the fix commits.
+- Orchestrator:
+  - Fixed the rechecker's two findings itself (`0cd0a29`).
+  - Removed a reviewer worktree that held only an uncommitted probe file, which made
+    `ruff check .` fail.
+  - Wrote this entry.
+- No agent edited `shared/`, `docs/CONTRACTS.md`, README/AGENTCORE prose, `mcp_server/`,
+  `mock/`, `telemetry/` or `web/`.
+
+### What was built (PLAN §4 Phase 2)
+
+| Item | Code | Tests |
+|---|---|---|
+| 1. MCP tool provider | `agent/mcp_provider.py` (`McpToolProvider`); `ToolProvider.call(..., on_progress=None)` | `tests/unit/agent/test_mcp_provider.py` (real FastMCP app in process) |
+| 2. One trace across agent → MCP → mock | A new MCP session per tool call, opened inside the calling node (see library notes) | `tests/integration/test_trace_propagation.py` (three real processes on loopback); `tests/e2e/test_happy_path.py` (compose) |
+| — Entry point | `agent/__main__.py` (`python -m helpdesk.agent`) | `tests/unit/agent/test_entry_point.py`; exit 3 when MCP is down at startup (integration) |
+| 3. `/chat/stream` | `agent/stream.py` (`TurnEvents`), `agent/tool_activity.py`; `ChatService._run` is the single turn for both endpoints | `tests/unit/agent/test_stream.py` (event order, a /chat-vs-stream parity matrix, disconnect, shutdown) |
+| 4. Serve `web/` | `agent/web_page.py`: `GET /` (Jaeger meta filled, escaped) and `GET /fixtures/{name}` | `tests/unit/agent/test_web_page.py` |
+| 5. Happy path | `agent-e2e` compose service (profile `e2e`, fake model, port 8081) | `tests/e2e/test_happy_path.py` |
+| 6. Restart | — | `tests/e2e/test_restart.py` |
+| 7. Chaos | — | `tests/e2e/test_chaos.py`: 100% errors, fail-after-commit, and a seeded mixed case |
+
+**Status events (PLAN item 3 asks for this to be written down): both approaches are used.**
+
+- The installed adapter path does expose MCP progress. The MCP server's retry notifications
+  ("Retrying (attempt n of 3)") are forwarded as `status` events of the form
+  `"<tool>: <message>"`.
+- A single `"Still working on <tool>…"` status is also sent once a tool call has run longer
+  than `SLOW_TOOL_NOTICE_S` (3 s). CONTRACTS §4 lists `status` for both "retries" and "slow
+  tool", and a slow response with no retry produces no progress notification.
+- Both go through LangGraph's custom stream writer, which does nothing on `/chat` runs.
+
+**Fake model:** `ScriptedChatModel` now picks its reply from the conversation (the number
+of AI messages after the last human message), not from an in-memory counter. An approve
+after `docker compose restart` therefore continues the script.
+
+### Review findings
+
+19 findings; 17 confirmed (2 major), 2 not confirmed.
+
+| Finding | Severity | Outcome |
+|---|---|---|
+| After a committed write, mcp's `call_tool` sent a follow-up `tools/list` (output-schema validation). If that failed, the saved write was reported as "could not be confirmed". Two reviewers found it. | major | Fixed `b80c7e7`: the provider sends `CallToolRequest` itself with `send_request`, and nothing follows it |
+| `initialize` and `tools/list` had no timeout, so a hung MCP server stalled a call, and startup forever | minor | Fixed `b80c7e7`: a session-wide `read_timeout_seconds` |
+| The model-visible write schemas kept the `*Input` title and description ("…including the injected arguments") | minor | Fixed `8e8abdc` |
+| The no-arguments-in-error-text test could not fail | minor | Fixed `c715204` |
+| /chat `tool_calls` gave the wrong args when one request reused a tool call id (older code; the stream was right) | minor | Fixed `8b69be2` |
+| A failure in event mapping left `astream` open, so the lock was released while `execute_write` still ran | minor | Fixed `cd65d00` (`aclosing`) |
+| The shutdown drain was unbounded (N × turn deadline) | minor | Fixed `722fcc1`; `stop_grace_period: 100s` in compose |
+| Rechecker: uvicorn waits for connected streams with no limit before the lifespan drain | minor | Fixed `0cd0a29`: `timeout_graceful_shutdown=5` |
+| Rechecker: the drain's bound was untested | minor | Fixed `0cd0a29`; the mutant now fails the test |
+| Test gaps: stream spans, slow-notice cancel, trace_id before `begin()`, web_page mutants, an e2e trace wait race, a "no duplicates" check that could not fail | minor | Fixed `e28af20`, `262af83`, `ab1a6ab`, `c59d5c5` |
+| No Phase 2 ai-log entry | minor | This entry |
+| The agent stays down if MCP is unavailable at agent startup (no `restart:` policy) | minor | **Author decision**, see Unsure 3 |
+| More rejected-call rows in the parity matrix | — | Not confirmed: the same code path is already covered by the rejected-batch row |
+| E2E chaos for 429 and slow responses | — | Not confirmed: the plan asks for high rates and fail-after-commit; 429 and timeouts are unit-tested in `mcp_server` |
+
+### Verified, and how
+
+- `make lint` → `All checks passed!`, `145 files already formatted`
+- `make typecheck` → `Success: no issues found in 77 source files`
+- `make test` → `1006 passed, 7 warnings` (the warnings are the existing aiosqlite
+  datetime-adapter DeprecationWarnings)
+- `ANTHROPIC_API_KEY=placeholder-not-a-real-key make up` → mock, mcp and agent healthy.
+  Then `make test-e2e` twice → `18 passed in 28.30s` and `18 passed in 27.62s`.
+- Against the running stack:
+  - `GET /` → 200 text/html.
+  - `GET /fixtures/propose.sse` → 200.
+  - `GET /fixtures/../pyproject.toml` → 404.
+- The build agent's smoke run on the host (fake model) found one trace id with spans in all
+  three services. The parent links ran agent httpx `POST` → MCP `POST /mcp` → `mcp.tool` →
+  MCP httpx `GET` → mock `GET /tickets`.
+- No token was found in `./traces` or in `docker compose logs`, checked with grep.
+- Mutation probes:
+  - **Build:** a reused MCP session breaks the trace test. The old counter-based fake model
+    breaks the restart e2e test. Without the mcp traces mount, the e2e trace test fails.
+  - **Review:** each fixed test gap is backed by a mutant that now fails.
+- **Not done: the PLAN gate's "manual run with a real model, end to end in the browser".**
+  `.env` has no `ANTHROPIC_API_KEY`, so this is left for the author.
+
+### Deviations from the plan / contracts, and why
+
+- **Provider:**
+  - It uses the adapter's `StreamableHttpConnection` / `create_session` and
+    `load_mcp_tools` (for list pagination), not the adapter's converted `StructuredTool`s.
+    Those turn `isError` into an exception, and the graph builds its own `ToolMessage`s from
+    the exact contract text.
+  - Calls go through `ClientSession.send_request(CallToolRequest)`, not `call_tool`, so no
+    `tools/list` follows a write.
+- **One MCP session per tool call:** each call makes about 6 HTTP requests (about 23 ms on
+  localhost). This is the cost of correct trace context (see library notes).
+- **Client timeout:** `TOOL_DEADLINE_S + TOOL_ATTEMPT_TIMEOUT_S` (20 s), longer than the
+  server's 15 s deadline, so the server's own `TIMEOUT` text arrives first. No new Setting.
+- **Trace propagation** is checked in a Docker-free integration test, and also in
+  `tests/e2e`.
+- **E2E runs against a second agent, `agent-e2e`** (profile `e2e`, `MODEL_PROVIDER=fake`,
+  127.0.0.1:8081, its own volume, `TRACES_DIR=/app/traces/e2e`), so `agent` stays on the real
+  model for the browser.
+  - `make test-e2e` starts it.
+  - The restart test runs `docker compose restart agent-e2e`, not `agent` as PLAN says.
+  - The network-isolation and compose static checks cover both agents.
+- **Compose:**
+  - The `mcp` service had no `./traces` bind mount, so its spans never reached the host.
+    The mount was added, with a static test.
+  - `stop_grace_period: 100s` for both agents.
+- **Stream text:** model text is streamed as it arrives. That includes text the model writes
+  before a tool call, so the tokens can be longer than /chat's `reply`: the intermediate texts,
+  then `"\n\n"`, then /chat's exact reply. Text the service adds itself (proposal ask, re-ask,
+  stale reply, fallbacks) is sent as tokens. On `error`, the event carries /chat's reply.
+- **Unexpected exception:** /chat returns 500, but a stream cannot after its 200, so it
+  ends with `error` + `done{status:"error"}`.
+- **Status text:** the wording is `"<tool>: Retrying (attempt 2 of 3)"`; the `web/fixtures`
+  wording differs slightly.
+- **Shutdown:**
+  - After shutdown starts, a queued streamed turn ends without running (`INTERRUPTED_REPLY`,
+    status error). Its client has already disconnected.
+  - The drain is bounded by one turn deadline, and uvicorn's wait for open connections by
+    5 s.
+- **Write schemas:** the model-visible schemas for `create_ticket` and `add_comment` have no
+  top-level title or description; the tool description stays.
+
+### Library notes added in Phase 2 (verified against installed source)
+
+- **mcp 1.30.0:**
+  - `ClientSession.call_tool` runs `_validate_tool_result`, which calls `list_tools()` when
+    the output schema is not cached (`mcp/client/session.py:386, 421`).
+    `BaseSession.send_request` is public (`mcp/shared/session.py:240`).
+  - The streamable-HTTP client sends requests from tasks started when the session opens
+    (`mcp/client/streamable_http.py:587, 672`). They carry the OTel context of the session's
+    opener, hence a session per call.
+  - Progress callbacks run in the session's receive loop, and their exceptions are caught
+    and logged (`mcp/shared/session.py:405-421`).
+- **langchain-mcp-adapters 0.3.2:**
+  - `create_session` yields an uninitialised `ClientSession` (`sessions.py:406`) and wires
+    only the logging and elicitation callbacks (`sessions.py:434`).
+  - `StreamableHttpConnection.session_kwargs` is passed to `ClientSession`
+    (`sessions.py:366`).
+  - `load_mcp_tools` follows `nextCursor` (`tools.py:320`).
+- **opentelemetry-instrumentation-httpx 0.66b1** patches only the real transports
+  (`__init__.py:1283`). `ASGITransport` gets no `traceparent`, so propagation can only be
+  shown over a socket.
+- **langgraph 1.2.15:**
+  - With a list `stream_mode`, `astream` yields `(mode, payload)` tuples
+    (`pregel/main.py:4428`).
+  - An interrupt arrives as an `updates` item `{"__interrupt__": ...}`
+    (`pregel/_loop.py:1579`).
+  - The custom writer does nothing unless `"custom"` is streamed, and it needs the node's
+    contextvars (`pregel/main.py:3355-3395`).
+  - `astream` is annotated `AsyncIterator` but is an async generator; `aclosing` needs a
+    cast.
+- **FastAPI 0.143.2** has native SSE (`fastapi/sse.py`: `EventSourceResponse`,
+  `ServerSentEvent`), with `: ping` every 15 s and no-cache / no-buffering headers.
+- **langchain-core 1.6.11 / langchain-anthropic 1.7.6:** `BaseMessage.text` keeps only text
+  blocks. Anthropic tool arguments stream as `input_json_delta` blocks and never become token
+  text.
+- **uvicorn 0.54:**
+  - With `lifespan="on"`, a failed startup exits with status 3 (`server.py:118`).
+  - `shutdown()` waits for open connections before the lifespan shutdown, with no limit
+    unless `timeout_graceful_shutdown` is set (`server.py:281-311`).
+- **httpx 0.28.1:** `ASGITransport` buffers the whole response and sends `http.disconnect`
+  only at the end (`_transports/asgi.py:134-145`). The disconnect tests drive the ASGI app
+  directly.
+
+### Unsure — author should review
+
+1. **Real-model run in the browser (PLAN gate).** Not done: there is no model key in `.env`.
+   - Run `make up` with `ANTHROPIC_API_KEY` set and open http://127.0.0.1:8080.
+   - Plain `make up` fails without a key: the default `agent` exits with
+     `MissingSecretError`, so `--wait` fails. The e2e gate was run with a placeholder key in
+     the shell.
+   - Should `make up` tolerate a missing key, or should the README just state that it needs
+     one?
+2. **Stream text policy.**
+   - Intermediate model text is streamed, so the stream can show more text than /chat's
+     `reply`.
+   - The alternative is to buffer each reply until it ends: exact parity with /chat, but no
+     live text.
+   - Should CONTRACTS §4 say which one?
+3. **No `restart:` policy in compose.**
+   - If MCP is down when the agent starts, the agent exits with 3 and stays down until
+     `make up`. A manual `docker compose restart agent` while mcp is restarting is enough.
+   - Options: `restart: on-failure` on both agents, or a documented manual recovery.
+   - A restart policy is not a tool retry, so the single-retry-layer rule is not affected.
+4. **Status of a failed approved write.** It is `ok`, with the honest
+   `EMPTY_AFTER_FAILED_WRITE_REPLY`, or with the model's own reply when it writes one.
+   CONTRACTS §3.4 does not say. The e2e chaos tests pin `ok`.
+5. **Shutdown behaviour.**
+   - Shutdown can take up to 5 s plus `TURN_DEADLINE_S` (95 s by default). Compose allows
+     100 s.
+   - A shorter bound would need a new Setting in `shared/`.
+   - Turns queued at shutdown end without running.
+6. **Span tree.** The MCP httpx client spans are children of `agent.request`, not of the
+   LangGraph `tools` / `execute_write` node span, because OpenInference's LangChain spans are
+   not made the current OTel context. The trace id is correct; only the nesting in
+   `show_trace` is flatter.
+7. **Not in CONTRACTS §4:**
+   - A tool call cut off by the deadline has a `tool_start` and no `tool_end`.
+   - A stream that hits a server bug ends with `error` + `done{status:error}`, while /chat
+     returns 500.
+8. **Seeded mixed-chaos e2e test** (`seed=8`). It depends on the mock's chaos draw order.
+   If `chaos.py` changes, the test fails on `attempts == 3`; it does not pass silently.
+
+### Suggestions
+
+- An integration test that drives MCP retry progress through the real provider into
+  `/chat/stream` with chaos on. Unit tests use the fake provider; the e2e chaos stream test
+  covers it on compose.
+- Refresh the `web/fixtures/*.sse` status wording to match the real text.
+- Cache tool output schemas, or reuse sessions with per-request `traceparent` injection,
+  if per-call MCP overhead matters with a real model. This needs a design decision because of
+  the trace-context issue.
+- Pass `on_progress` only on streamed runs, so /chat does not ask the MCP server for
+  progress notifications. Today they are sent and dropped.
