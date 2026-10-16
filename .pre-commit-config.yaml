@@ -26,7 +26,8 @@ repos:
       - id: detect-private-key
       - id: check-added-large-files
       - id: check-yaml
+      # SSE fixtures are byte-exact wire format: a frame ends with a blank line.
       - id: end-of-file-fixer
-        exclude: ^(CLAUDE|PLAN)\.md$
+        exclude: ^((CLAUDE|PLAN)\.md|web/fixtures/.*\.sse)$
       - id: trailing-whitespace
-        exclude: ^(CLAUDE|PLAN)\.md$
+        exclude: ^((CLAUDE|PLAN)\.md|web/fixtures/.*\.sse)$

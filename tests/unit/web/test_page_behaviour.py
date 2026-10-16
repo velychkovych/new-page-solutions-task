@@ -3,18 +3,21 @@
 The harness executes the <script> blocks of web/index.html against a DOM stand-in and a
 scripted fetch, so these tests cover the shipped code: the SSE parser, the /chat
 fallback rule, never re-sending a request whose stream started, the done/in-flight
-rules, the Jaeger link and the session rebuild. Node is not a Python dependency, so the
-module is skipped (with a reason under `-ra`) where `node` is not on PATH.
+rules, the Jaeger link and the session rebuild. Node is a required dev tool: `uv sync`
+installs a pinned binary into .venv (nodejs-wheel-binaries), so every machine runs the
+same version, and these tests fail rather than skip when it is missing.
 """
 
 import base64
 import json
+import os
 import random
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
+import nodejs_wheel.executable
 import pytest
 
 HERE = Path(__file__).resolve().parent
@@ -22,9 +25,17 @@ HARNESS = HERE / "page_harness.mjs"
 WEB = HERE.parents[2] / "web"
 INDEX = WEB / "index.html"
 FIXTURES = WEB / "fixtures"
-NODE = shutil.which("node")
+# The wheel's own binary, not whatever `node` happens to be on PATH.
+_NODE_DIR = Path(nodejs_wheel.executable.ROOT_DIR)
+NODE = shutil.which("node", path=str(_NODE_DIR if os.name == "nt" else _NODE_DIR / "bin"))
 
-pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
+
+@pytest.fixture(autouse=True, scope="module")
+def _require_node() -> None:
+    # Failing instead of skipping keeps the JS behaviour tests from silently dropping out of CI.
+    if NODE is None:
+        pytest.fail("node is required for the web behaviour tests; run `uv sync`", pytrace=False)
+
 
 TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
 STORAGE_KEY = "helpdesk.identity"
