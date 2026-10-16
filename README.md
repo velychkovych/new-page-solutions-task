@@ -318,8 +318,6 @@ flowchart TD
   - cache and results folders in a per-user directory under the system temp dir, not the
     repository
   - every inherited `DEEPEVAL_*` / `CONFIDENT_*` variable removed (no Confident AI upload)
-  - `make test` disables the pytest plugins deepeval installs (`-p no:deepeval`, `no:xdist`,
-    `no:xdist.looponfail`, `no:repeat`, `no:rerunfailures`)
 - A run passes, fails, is not exercised (it never reached what a check is about; today
   only `cursor_followed`, when no successful search returned a `next_cursor`), or is a
   judge error (no check failed, but a judge metric could not be scored: an API error after
