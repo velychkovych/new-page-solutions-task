@@ -4,6 +4,7 @@ No real model is called: the LangChain judge wraps a fake chat model here.
 """
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,11 +17,13 @@ from pydantic import BaseModel, Field, SecretStr
 from tests.unit.evals.conftest import collected, evidence, make_case, response, score, turn_run
 
 from evals.judges import (
+    JUDGE_FIELDS,
     JUDGE_NOTE,
     JudgeError,
     Judges,
     LangChainJudge,
     ScriptedJudge,
+    judge_settings,
     model_judges,
 )
 from evals.results import Outcome
@@ -257,6 +260,44 @@ def test_the_live_judge_is_built_by_the_model_factory_from_settings() -> None:
     )
     assert "save budget" in JUDGE_NOTE
     assert "claude-opus-5-5" in JUDGE_NOTE
+
+
+ENV_FILE = """\
+MOCK_API_TOKEN=mock-token-from-dotenv
+MOCK_ADMIN_TOKEN=admin-token-from-dotenv
+CHAOS_RATE_LIMIT_RATE=0.7
+CHAOS_ERROR_RATE=0.7
+ANTHROPIC_API_KEY=sk-ant-dummy
+JUDGE_MODEL_NAME=claude-opus-5-5
+MODEL_MAX_RETRIES=4
+"""
+
+
+def test_the_judge_reads_only_its_own_settings_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for name in ENV_FILE.split():
+        monkeypatch.delenv(name.split("=")[0], raising=False)
+    monkeypatch.setenv("MODEL_TIMEOUT_S", "7")
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_FILE + "MODEL_TIMEOUT_S=99\n", encoding="utf-8")
+    settings = judge_settings(env_file)
+    # The mock tokens stay in the file; CHAOS_* is not read, so it cannot fail validation.
+    assert settings.mock_api_token is None
+    assert settings.mock_admin_token is None
+    assert settings.chaos_rate_limit_rate == 0.0
+    assert settings.judge_model_name == "claude-opus-5-5"
+    assert settings.model_max_retries == 4
+    assert settings.anthropic_api_key == SecretStr("sk-ant-dummy")
+    # The shell still wins over the file, as with Settings().
+    assert settings.model_timeout_s == 7
+    judge = model_judges(settings).judge_for(make_case(), None)  # type: ignore[arg-type]
+    assert isinstance(judge, LangChainJudge)
+    assert judge.get_model_name() == "claude-opus-5-5"
+
+
+def test_the_judge_fields_are_settings_fields() -> None:
+    assert JUDGE_FIELDS.issubset(Settings.model_fields)
 
 
 async def test_the_scripted_judge_answers_with_the_scripted_verdict() -> None:

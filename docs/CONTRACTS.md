@@ -554,7 +554,9 @@ Every field is typed concretely, never `Any`, so the checkpointer can deserialis
   eval judge, default `anthropic`/`claude-haiku-5-5`) to the same `init_chat_model` path in
   `build_judge_model`; no other code path builds a model. The judge factory has no `fake`
   model: `JUDGE_MODEL_PROVIDER=fake` raises `ModelConfigError`, and the evals' fake tier passes
-  its own scripted judge.
+  its own scripted judge. The eval runner (host process) builds the judge's `Settings` from
+  only the judge's fields of `.env` (`evals.judges.JUDGE_FIELDS`), so the mock tokens stay out
+  of it.
 
   | `MODEL_PROVIDER` | `init_chat_model` provider | Class |
   |---|---|---|

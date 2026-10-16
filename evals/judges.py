@@ -16,8 +16,10 @@ DeepEval accepts `(result, cost)` from a custom model's `a_generate` and reads t
 counts off an `EvaluationCost`, which is how the judge's tokens reach the report.
 """
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from deepeval.models import DeepEvalBaseLLM
@@ -29,6 +31,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
+from pydantic_settings import DotEnvSettingsSource
 
 from evals.cases import Case, FakeVerdict, JudgeSpec
 from evals.traces import TokenUsage
@@ -215,6 +218,34 @@ def scripted_judges() -> Judges:
         provider="fake",
         note=FAKE_JUDGE_NOTE,
     )
+
+
+# What build_judge_model reads. The live runner takes only these from .env, so the mock
+# tokens and every other value there stay out of this process (CONTRACTS §7) and nothing
+# unrelated to the judge (CHAOS_*) can fail its validation.
+JUDGE_FIELDS = frozenset(
+    {
+        "judge_model_provider",
+        "judge_model_name",
+        "model_max_tokens",
+        "model_timeout_s",
+        "model_max_retries",
+        "anthropic_api_key",
+        "openai_api_key",
+        "aws_region",
+    }
+)
+
+
+def judge_settings(env_file: Path) -> Settings:
+    """Settings for the judge: the JUDGE_FIELDS of `env_file`, read by Settings' own parser.
+
+    The shell's variables still win over the file, as they do in `Settings()`.
+    """
+    from_file = DotEnvSettingsSource(Settings, env_file=env_file)()
+    shell = {name.lower() for name in os.environ}
+    picked = {k: v for k, v in from_file.items() if k in JUDGE_FIELDS and k not in shell}
+    return Settings(_env_file=None, **picked)
 
 
 def model_judges(settings: Settings) -> Judges:

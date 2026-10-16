@@ -4,7 +4,8 @@
                         [--out DIR] [--list]
 
 Live tier (default): the compose service `agent-eval` with the real model, and the judge
-model (JUDGE_MODEL_*, read from .env through Settings) for the judge metrics; costs money.
+model (JUDGE_MODEL_*, the only values read from .env, through Settings) for the judge
+metrics; costs money.
 `--fake`: local processes with the scripted model and a scripted judge, deterministic, no
 key needed; its results go to evals/results/fake/ and never replace the committed live
 results.
@@ -38,15 +39,17 @@ from evals.chaos_profiles import CHAOS_OFF
 from evals.dataset import build_dataset
 from evals.driver import CollectedRun, run_case
 from evals.fake_stack import FakeStack
-from evals.judges import Judges, model_judges, no_judges, scripted_judges
+from evals.judges import Judges, judge_settings, model_judges, no_judges, scripted_judges
 from evals.live_stack import LiveStack
 from evals.report import Report, RunMetadata, build_report, rate_text, write_report
 from evals.results import CaseRunResult, Outcome
 from evals.scoring import score_runs
 from evals.stack import ROOT, Stack, StackError, Tier, run_command
 from helpdesk.agent.model import ModelConfigError
-from helpdesk.shared.settings import MissingSecretError, Settings
+from helpdesk.shared.settings import MissingSecretError
 
+# The judge's settings come from here, not from the working directory (evals.judges).
+ENV_FILE = ROOT / ".env"
 LIVE_OUT = ROOT / "evals" / "results"
 FAKE_OUT = LIVE_OUT / "fake"
 RESULTS_PATHSPEC = LIVE_OUT.relative_to(ROOT).as_posix()
@@ -242,7 +245,7 @@ def needs_judge(cases: Sequence[Case]) -> bool:
 
 
 def judges_for(fake: bool, cases: Sequence[Case]) -> Judges:
-    """The fake tier's scripted judge, or the judge model from Settings (live tier).
+    """The fake tier's scripted judge, or the judge model from the judge's settings (live).
 
     Built before any case runs, so a missing judge key costs no agent tokens.
     """
@@ -250,7 +253,15 @@ def judges_for(fake: bool, cases: Sequence[Case]) -> Judges:
         return scripted_judges()
     if not needs_judge(cases):
         return no_judges()
-    return model_judges(Settings())
+    return model_judges(judge_settings(ENV_FILE))
+
+
+def settings_errors(exc: ValidationError) -> str:
+    """Which settings are wrong, without their values: those may be keys."""
+    return "; ".join(
+        f"{'.'.join(map(str, error['loc'])) or 'settings'}: {error['msg']}"
+        for error in exc.errors(include_input=False, include_url=False)
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -269,7 +280,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     repeats = args.repeats or (FAKE_REPEATS if args.fake else LIVE_REPEATS)
     try:
         judges = judges_for(args.fake, cases)
-    except (MissingSecretError, ModelConfigError, ValidationError) as exc:
+    except ValidationError as exc:
+        print(f"error: the judge model cannot be built: {settings_errors(exc)}", file=sys.stderr)
+        return EXIT_INFRA
+    except (MissingSecretError, ModelConfigError) as exc:
         print(f"error: the judge model cannot be built: {exc}", file=sys.stderr)
         return EXIT_INFRA
     return run_and_report(args, cases, repeats, judges)

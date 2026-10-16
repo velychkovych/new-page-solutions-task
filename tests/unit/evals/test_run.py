@@ -138,12 +138,30 @@ def test_the_live_tier_needs_the_judge_before_any_run(
         raise AssertionError("no case may run without a judge")
 
     monkeypatch.setattr(run_module, "model_judges", no_key)
-    monkeypatch.setattr(run_module, "Settings", lambda: None)
+    monkeypatch.setattr(run_module, "judge_settings", lambda _: None)
     monkeypatch.setattr(run_module, "evaluate_cases", must_not_run)
     assert main(["--case", "status_question", "--out", str(tmp_path)]) == EXIT_INFRA
     assert (
         "the judge model cannot be built: ANTHROPIC_API_KEY is not set" in capsys.readouterr().err
     )
+
+
+def test_a_settings_error_names_the_setting_and_never_prints_a_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("MOCK_API_TOKEN=mock-FAKEPROBE456\n", encoding="utf-8")
+    monkeypatch.setattr(run_module, "ENV_FILE", env_file)
+    # A model-level error: pydantic's own message repeats the head and tail of every
+    # input, which here are a mock token and the key.
+    monkeypatch.setenv("CHAOS_RATE_LIMIT_RATE", "0.7")
+    monkeypatch.setenv("CHAOS_ERROR_RATE", "0.7")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-FAKEPROBE123")
+    assert main(["--case", "status_question", "--out", str(tmp_path)]) == EXIT_INFRA
+    err = capsys.readouterr().err
+    assert "the judge model cannot be built" in err
+    assert "CHAOS_RATE_LIMIT_RATE + CHAOS_ERROR_RATE must be <= 1" in err
+    assert "FAKEPROBE" not in err
 
 
 def test_judges_per_tier() -> None:
