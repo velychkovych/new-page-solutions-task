@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.unit.evals.conftest import tree_state
+
 from evals.run import EXIT_OK
 from evals.stack import ROOT
 
@@ -18,6 +20,7 @@ BANNERS = ("You're running DeepEval", "Confident AI", "Evaluation completed", "h
 
 
 def test_a_fake_run_writes_only_its_results(tmp_path: Path) -> None:
+    repo_deepeval = tree_state(ROOT / ".deepeval")
     cwd, tmp, home, out = (tmp_path / name for name in ("cwd", "tmp", "home", "out"))
     for directory in (cwd, tmp, home):
         directory.mkdir()
@@ -38,7 +41,7 @@ def test_a_fake_run_writes_only_its_results(tmp_path: Path) -> None:
     assert sorted(path.name for path in out.iterdir()) == ["latest.json", "latest.md"]
     for directory in (cwd, tmp, home):
         assert list(directory.iterdir()) == [], directory.name
-    assert not (ROOT / ".deepeval").exists()
+    assert tree_state(ROOT / ".deepeval") == repo_deepeval
     lines = run.stdout.splitlines()
     assert lines[-6].startswith("Pass rate: 1/1 (100%)")
     assert lines[-1] == f"Results: {out}"

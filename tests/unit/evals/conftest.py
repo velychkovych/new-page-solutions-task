@@ -7,6 +7,7 @@ test module, also sets up the DeepEval containment before deepeval is first impo
 import asyncio
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from pydantic import JsonValue
@@ -262,3 +263,18 @@ async def score(run: CollectedRun, judges: Judges | None = None) -> CaseRunResul
     """Score one collected run through DeepEval (the scripted judge by default)."""
     judges = judges or scripted_judges()
     return await score_run(run, golden(run.case), judges.judge_for, asyncio.Semaphore(4))
+
+
+type TreeState = tuple[tuple[str, int, int], ...] | None
+
+
+def tree_state(root: Path) -> TreeState:
+    """What is at `root` (None if nothing), to show a run left it as it found it.
+
+    A folder that already exists (a gitignored `.deepeval/` from an earlier run) is not
+    something the run under test did.
+    """
+    if not root.exists():
+        return None
+    paths = [root, *sorted(root.rglob("*"))]
+    return tuple((str(p.relative_to(root)), p.stat().st_mtime_ns, p.stat().st_size) for p in paths)

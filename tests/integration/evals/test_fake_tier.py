@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from tests.unit.evals.conftest import score
+from tests.unit.evals.conftest import score, tree_state
 
 from evals import DEEPEVAL_HOME
 from evals.cases import Case, load_cases
@@ -268,6 +268,7 @@ def _texts(root: Path) -> dict[str, str]:
 async def test_no_throwaway_token_reaches_a_trace_a_log_or_a_report(
     stacks: list[FakeStack], client: httpx.AsyncClient, tmp_path: Path
 ) -> None:
+    deepeval_before = {path: tree_state(path) for path in (DEEPEVAL_HOME, ROOT / ".deepeval")}
     # A case on every stack first, so every service has written spans and logs whatever
     # ran before (or did not, with `-k` or `--lf`).
     case = _case("status_question")
@@ -287,5 +288,4 @@ async def test_no_throwaway_token_reaches_a_trace_a_log_or_a_report(
             for secret in stack.secrets:
                 assert secret not in text, name
     # DeepEval wrote nothing of its own, here or in the repository.
-    assert not DEEPEVAL_HOME.exists()
-    assert not (ROOT / ".deepeval").exists()
+    assert {path: tree_state(path) for path in deepeval_before} == deepeval_before
