@@ -1,5 +1,6 @@
 """Track C: LangGraph agent and its HTTP API.
 
-`api.create_app(settings=..., tool_provider=..., model=...)` builds the service. The
-`python -m helpdesk.agent` entry point arrives in Phase 2 with the MCP tool provider.
+`python -m helpdesk.agent` serves `api.create_app(...)` with the model from
+`model.build_chat_model` and the MCP tool provider (`mcp_provider.McpToolProvider`).
+Tests pass a fake tool provider and a fake model to `create_app` instead.
 """
