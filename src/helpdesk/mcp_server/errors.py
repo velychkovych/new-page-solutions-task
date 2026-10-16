@@ -5,16 +5,18 @@ For a write it also says whether the change was applied: a 4xx means the mock di
 it, while a timeout, an unavailable or misbehaving upstream, or a bug in this server leave
 the outcome unknown.
 
-Error text is built only from our own wording, argument names, HTTP status codes, attempt
-counts and exception type names. It never includes a raw upstream body, an exception
-message, a stack trace or a header value.
+Error text is built only from our own wording, argument and tool names, HTTP status
+codes, attempt counts and exception type names. It never includes a raw upstream body, an
+exception message, a stack trace or a header value. A name the model sent is echoed only
+when it is a plain identifier, so the model's text cannot add a second "Next step:".
 """
 
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, StringConstraints, ValidationError
 
 from helpdesk.mcp_server.retry import UpstreamCallError
 from helpdesk.shared.errors import ErrorCode, format_tool_error
@@ -22,14 +24,16 @@ from helpdesk.shared.ids import IDEMPOTENCY_KEY_PATTERN, PRINCIPAL_ID_PATTERN, T
 from helpdesk.shared.tickets import ApiError
 from helpdesk.shared.tools import INJECTED_ARGS, WRITE_TOOLS
 
-# The model must not claim either outcome, and must not make up a ticket id.
+# The model must not claim either outcome, and must not make up a ticket id. It must not
+# propose the write again on its own either: a new proposal gets a new idempotency key, so
+# a write that did commit would be applied twice.
 WRITE_NOT_CONFIRMED_NEXT_STEP = (
     "Tell the user the change could not be confirmed and may or may not have been applied;"
-    " do not make up a ticket id"
+    " do not propose it again unless the user asks, and do not make up a ticket id"
 )
 WRITE_INTERNAL_NEXT_STEP = (
     "Tell the user the change could not be confirmed and to contact an administrator;"
-    " do not retry and do not make up a ticket id"
+    " do not propose it again and do not make up a ticket id"
 )
 MISCONFIGURED_NEXT_STEP = (
     "Tell the user the helpdesk is misconfigured and to contact an administrator"
@@ -42,7 +46,13 @@ _NOT_APPLIED_ADMIN_NEXT_STEP = (
     "Do not retry; tell the user the change was not applied and to contact an administrator"
 )
 _MAX_VALIDATION_ISSUES = 5
-_MAX_NAME_CHARS = 64
+# Any other name the model sent is described, never echoed.
+_SHOWN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+# Why a value of the right shape is still rejected, where the rule alone does not say:
+# strict mode rejects 7.0 and "7" for an integer.
+_TYPE_REASONS: Mapping[str, str] = {
+    "int_type": "sent as a JSON integer without quotes or a decimal point",
+}
 
 # Patterns read better as a description than as a regex.
 _PATTERN_RULES: Mapping[str, str] = {
@@ -100,6 +110,10 @@ def _attempts(attempts: int) -> str:
     return "1 attempt" if attempts == 1 else f"{attempts} attempts"
 
 
+def _shown(name: str) -> bool:
+    return _SHOWN_NAME.fullmatch(name) is not None
+
+
 # --- argument validation ---------------------------------------------------------------
 
 
@@ -137,14 +151,50 @@ def _rule(prop: Mapping[str, Any], defs: Mapping[str, Any]) -> str:
     return rule
 
 
+def _stripped_arguments(input_model: type[BaseModel]) -> set[str]:
+    """Arguments whose whitespace is stripped before the length check. The JSON schema does
+    not say so, and without it "   " looks like valid text of 1 to 200 characters."""
+    return {
+        field.alias or name
+        for name, field in input_model.model_fields.items()
+        if any(isinstance(m, StringConstraints) and m.strip_whitespace for m in field.metadata)
+    }
+
+
 def argument_rules(input_model: type[BaseModel]) -> dict[str, str]:
     """Each argument's rule, e.g. {"page_size": "a whole number from 1 to 20"}."""
     schema = input_model.model_json_schema(by_alias=True)
     defs: Mapping[str, Any] = schema.get("$defs", {})
-    return {
-        name: _ARGUMENT_RULES.get(name) or _rule(prop, defs)
-        for name, prop in schema["properties"].items()
-    }
+    stripped = _stripped_arguments(input_model)
+    rules: dict[str, str] = {}
+    for name, prop in schema["properties"].items():
+        rule = _ARGUMENT_RULES.get(name) or _rule(prop, defs)
+        if name in stripped:
+            rule += ", not counting leading and trailing whitespace"
+        rules[name] = rule
+    return rules
+
+
+def _broken_rule(name: str, error_type: str, rule: str) -> str:
+    if error_type == "missing":
+        return f"{name} is required and must be {rule}"
+    if reason := _TYPE_REASONS.get(error_type):
+        return f"{name} must be {rule}, {reason}"
+    return f"{name} must be {rule}"
+
+
+def _fix_step(tool: str, wrong: Sequence[str], unknown: Sequence[str], hidden: int) -> str:
+    fixes: list[str] = []
+    if wrong:
+        fixes.append(f"fix {_join(wrong)}")
+    removals = list(unknown)
+    if hidden:
+        other = "every other" if removals else "every"
+        removals.append(f"{other} argument {tool} does not take")
+    if removals:
+        fixes.append(f"remove {_join(removals)}")
+    step = f"{', '.join(fixes)}, then call {tool} again"
+    return step[0].upper() + step[1:]
 
 
 def invalid_arguments(
@@ -155,6 +205,7 @@ def invalid_arguments(
     rules = argument_rules(input_model)
     issues: dict[str, str] = {}
     unknown: dict[str, str] = {}
+    hidden = 0
     for error in exc.errors(include_url=False, include_input=False):
         if not error["loc"]:
             # Not reachable over MCP, whose arguments are always an object.
@@ -162,18 +213,22 @@ def invalid_arguments(
             continue
         name = str(error["loc"][0])
         if name not in rules:
-            # An unknown name is the model's own text, so it is shown, but kept short.
-            if len(name) > _MAX_NAME_CHARS:
-                name = name[:_MAX_NAME_CHARS] + "..."
-            unknown[name] = f"{name} is not an argument of {tool}"
-        elif error["type"] == "missing":
-            issues.setdefault(name, f"{name} is required and must be {rules[name]}")
+            if _shown(name):
+                unknown[name] = f"{name} is not an argument of {tool}"
+            else:
+                hidden += 1
         else:
-            issues.setdefault(name, f"{name} must be {rules[name]}")
+            issues.setdefault(name, _broken_rule(name, error["type"], rules[name]))
     # Schema order, then unknown arguments, so the text does not depend on input order.
     order = list(rules)
     wrong = sorted(issues, key=lambda name: order.index(name) if name in order else -1)
     issues = {name: issues[name] for name in wrong} | unknown
+    if hidden:
+        names = "1 argument whose name is" if hidden == 1 else f"{hidden} arguments whose names are"
+        verb = "is not an argument" if hidden == 1 else "are not arguments"
+        issues["<hidden>"] = (
+            f"{names} not shown {verb} of {tool}, which takes only {_join(list(rules))}"
+        )
 
     shown = list(issues.values())[:_MAX_VALIDATION_ISSUES]
     cause = "; ".join(shown)
@@ -186,13 +241,9 @@ def invalid_arguments(
         return ToolCallError(
             ErrorCode.INVALID_ARGUMENT, cause, next_step=_NOT_APPLIED_ADMIN_NEXT_STEP
         )
-    fixes: list[str] = []
-    if wrong:
-        fixes.append(f"fix {_join(wrong)}")
-    if unknown:
-        fixes.append(f"remove {_join(list(unknown))}")
-    step = f"{', '.join(fixes)}, then call {tool} again"
-    return ToolCallError(ErrorCode.INVALID_ARGUMENT, cause, next_step=step[0].upper() + step[1:])
+    return ToolCallError(
+        ErrorCode.INVALID_ARGUMENT, cause, next_step=_fix_step(tool, wrong, list(unknown), hidden)
+    )
 
 
 # --- mock responses --------------------------------------------------------------------
@@ -320,6 +371,20 @@ def deadline_exceeded(exc: UpstreamCallError, deadline_s: float) -> ToolCallErro
         f"the ticketing system did not answer within the {deadline_s:g} s deadline"
         f" ({_attempts(exc.attempts)})",
         outcome_unknown=True,
+    )
+
+
+# --- unknown tools ---------------------------------------------------------------------
+
+
+def unknown_tool(name: str, tools: Collection[str]) -> str:
+    """FastMCP's own text is "Unknown tool: <name>", outside the contract and echoing the
+    model's text as-is."""
+    tool = f"no tool named {name}" if _shown(name) else "no tool with the requested name"
+    return format_tool_error(
+        ErrorCode.INVALID_ARGUMENT,
+        f"there is {tool}, so nothing was run; the tools are {_join(list(tools))}",
+        "Call one of the listed tools instead",
     )
 
 

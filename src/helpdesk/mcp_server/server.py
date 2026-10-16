@@ -1,18 +1,21 @@
 """Builds the FastMCP server: four tools over streamable HTTP at /mcp, plus GET /health,
 and the ASGI app that serves it with telemetry (CONTRACTS §2.1, §6)."""
 
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.tools import Tool
+from mcp.types import ContentBlock
 from opentelemetry import trace
 from opentelemetry.trace import Tracer
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from helpdesk.mcp_server.errors import unknown_tool
 from helpdesk.mcp_server.mock_client import MockApiClient
 from helpdesk.mcp_server.redaction import SecretRedactor
 from helpdesk.mcp_server.request_trace import CaptureTraceContext
@@ -25,6 +28,28 @@ SERVER_NAME = "helpdesk-tickets"
 TELEMETRY_SERVICE = "mcp"
 MCP_PATH = "/mcp"
 HEALTH_PATH = "/health"
+
+logger = logging.getLogger(__name__)
+
+
+class UnknownToolError(Exception):
+    """Its message is the whole tool result text: the low-level server returns `str(exc)`
+    of any exception from the call handler as an error result, with no prefix."""
+
+
+class HelpdeskMCP(FastMCP[Any]):
+    """FastMCP with a contract error text (CONTRACTS §2.4) for a tool it does not have."""
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        # mcp 1.30.0: ToolManager.call_tool raises ToolError("Unknown tool: <name>"), and the
+        # low-level server returns that text as-is, which parse_tool_error cannot read.
+        if self._tool_manager.get_tool(name) is None:
+            tools = [tool.name for tool in self._tool_manager.list_tools()]
+            logger.warning("call to an unknown tool rejected")
+            raise UnknownToolError(unknown_tool(name, tools))
+        return await super().call_tool(name, arguments)
 
 
 async def health(_request: Request) -> Response:
@@ -46,7 +71,7 @@ def build_server(
             result_max_bytes=settings.trace_result_max_bytes,
         )
     )
-    server: FastMCP[Any] = FastMCP(
+    server: FastMCP[Any] = HelpdeskMCP(
         SERVER_NAME,
         tools=tools,
         host=settings.mcp_host,
