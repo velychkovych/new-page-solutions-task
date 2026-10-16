@@ -95,8 +95,9 @@ services:
       - ./traces:/app/traces
     networks: [agent_net]
     ports: ["127.0.0.1:8080:8080"]
-    # Shutdown lets a running turn finish, bounded by TURN_DEADLINE_S (90 s by default),
-    # so it can save its checkpoint. Docker's default 10 s would SIGKILL it first.
+    # Shutdown lets a running turn finish, so it can save its checkpoint: up to 5 s for
+    # open connections (GRACEFUL_SHUTDOWN_S in agent/__main__.py), then the drain, bounded
+    # by TURN_DEADLINE_S (90 s by default). Docker's default 10 s would SIGKILL it first.
     stop_grace_period: 100s
     depends_on:
       mcp: {condition: service_healthy}

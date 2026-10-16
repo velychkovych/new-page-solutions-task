@@ -76,6 +76,8 @@ async def test_serve_builds_the_app_and_binds_the_configured_address(
     (config,) = configs
     assert (config.host, config.port) == ("0.0.0.0", 8123)  # noqa: S104
     assert config.lifespan == "on"
+    # Bounded, so a connected stream cannot hold shutdown before the lifespan's drain.
+    assert config.timeout_graceful_shutdown == entry.GRACEFUL_SHUTDOWN_S
     assert isinstance(config.app, FastAPI)
     (kwargs,) = built
     assert kwargs["settings"] is settings

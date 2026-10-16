@@ -1051,3 +1051,34 @@ async def test_shutdown_does_not_start_queued_streamed_turns(
     assert len(model.calls) == 1  # only the turn that held the lock ever reached the model
     request_spans = [s for s in spans[1].get_finished_spans() if s.name == attrs.SPAN_REQUEST]
     assert [s.attributes[attrs.REQUEST_STATUS] for s in request_spans] == ["error"] * 4
+
+
+async def test_shutdown_cancels_a_streamed_turn_that_outlives_the_drain_bound(
+    settings, provider, fake_model, spans, caplog
+):
+    """The drain's own bound: a turn that ignores its deadline is cancelled, not awaited."""
+    deadline_s = 0.3
+    never = asyncio.Event()
+    started = asyncio.Event()
+
+    async def stuck_turn(self: Any, *args: Any, **kwargs: Any) -> Any:
+        started.set()
+        await never.wait()
+
+    app = create_app(
+        settings=settings.model_copy(update={"turn_deadline_s": deadline_s}),
+        tool_provider=provider,
+        model=fake_model(responses=[AIMessage("unused")]),
+        tracer=spans[0].get_tracer("t"),
+    )
+    # Without the drain's bound the lifespan exit would wait forever; fail instead.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("helpdesk.agent.service.ChatService._limited_turn", stuck_turn)
+        async with asyncio.timeout(10), app.router.lifespan_context(app):
+            await _start_stream_and_leave(app, {**BODY, "message": "hello"})
+            await asyncio.wait_for(started.wait(), timeout=5)
+            stopping = asyncio.get_running_loop().time()
+    drained_s = asyncio.get_running_loop().time() - stopping
+
+    assert deadline_s <= drained_s < deadline_s + 1.0
+    assert "cancelled 1 streamed turns at shutdown" in caplog.text

@@ -10,6 +10,13 @@ from helpdesk.agent.mcp_provider import McpToolProvider
 from helpdesk.agent.model import ModelConfigError, build_chat_model
 from helpdesk.shared.settings import MissingSecretError, Settings
 
+# uvicorn 0.54 waits for open connections before it runs the lifespan shutdown, with no
+# limit by default. A client still reading a stream would then hold shutdown for its whole
+# turn, and the turns queued behind it would each run in full. After this many seconds
+# uvicorn drops the connections. The turns run in their own tasks, so they carry on, and
+# the lifespan's drain (bounded by TURN_DEADLINE_S) takes over.
+GRACEFUL_SHUTDOWN_S = 5
+
 
 async def serve(settings: Settings) -> None:
     # Built before serving, so a missing model key or fake script stops the process at once.
@@ -27,6 +34,7 @@ async def serve(settings: Settings) -> None:
         # reports startup.failed as "lifespan unsupported" and serves without them. With
         # "on", a failed startup (e.g. the MCP server unreachable) exits with status 3.
         lifespan="on",
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S,
     )
     await uvicorn.Server(config).serve()
 
