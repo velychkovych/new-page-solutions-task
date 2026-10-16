@@ -694,8 +694,20 @@ after `docker compose restart` therefore continues the script.
   - **Build:** a reused MCP session breaks the trace test. The old counter-based fake model
     breaks the restart e2e test. Without the mcp traces mount, the e2e trace test fails.
   - **Review:** each fixed test gap is backed by a mutant that now fails.
-- **Not done: the PLAN gate's "manual run with a real model, end to end in the browser".**
-  `.env` has no `ANTHROPIC_API_KEY`, so this is left for the author.
+- **Real-model run (after the author added `ANTHROPIC_API_KEY`), through the API:**
+  - Setup: `make up`, then `make seed`, model `claude-sonnet-5-5`.
+  - Turn 1 (`/chat`, user `bob`), a new issue about a monitor that is not detected after a
+    dock firmware update:
+    - three `search_tickets` calls, all empty;
+    - a proposed `create_ticket` (hardware, medium); status `awaiting_approval`, 0 writes.
+  - Turn 2 (`/chat/stream`, text "yes"):
+    - events: `tool_start`/`tool_end` for `create_ticket`, then 83 `token` events, then
+      `done{status:"ok"}`;
+    - the mock holds `INC-0016`, and `/admin/writes` has total 1 under one key.
+  - `make trace` for turn 2: 23 spans across agent, mcp and mock. The LLM span shows
+    in=3307, out=334, cache_read=2766, cache_write=539.
+  - The browser part of this gate step is left to the author (it is also the demo
+    recording).
 
 ### Deviations from the plan / contracts, and why
 
@@ -782,8 +794,8 @@ after `docker compose restart` therefore continues the script.
 
 ### Unsure — author should review
 
-1. **Real-model run in the browser (PLAN gate).** Not done: there is no model key in `.env`.
-   - Run `make up` with `ANTHROPIC_API_KEY` set and open http://127.0.0.1:8080.
+1. **Real-model run.** It passed through the API (see Verified). The browser click-through
+   is left to the author.
    - Plain `make up` fails without a key: the default `agent` exits with
      `MissingSecretError`, so `--wait` fails. The e2e gate was run with a placeholder key in
      the shell.
