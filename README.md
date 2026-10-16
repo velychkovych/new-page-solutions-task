@@ -18,10 +18,11 @@ Prerequisites: Docker (with Compose v2) and [uv](https://docs.astral.sh/uv/).
 make setup            # uv sync, pre-commit hooks, .env with generated mock tokens
 # add ANTHROPIC_API_KEY=... to .env
 make up               # build + start mock, mcp, agent; waits for healthchecks
+make seed             # reset the mock DB to the 15 seed tickets
 open http://localhost:8080
 make up OBS=1         # same, plus Jaeger UI on http://localhost:16686
 make lint typecheck test
-make test-e2e         # needs `make up`
+make test-e2e         # needs `make up`; starts agent-e2e (fake model) on :8081
 make eval             # live evals with a real model (costs money), 3 repeats
 make chaos-on         # / make chaos-off — mock failure injection for the demo
 make trace ID=<trace_id>
@@ -37,20 +38,67 @@ make down
 
 The full list is in [`.env.example`](.env.example): one line per `Settings` field.
 
+- With the default `MODEL_PROVIDER=anthropic`, the agent exits at startup when
+  `ANTHROPIC_API_KEY` is empty (`MissingSecretError`, `src/helpdesk/agent/__main__.py`), so
+  `make up` (`--wait`) fails without a key.
+
 ## b. Architecture overview
 
 <!-- HUMAN: write this -->
 
-<!-- generated: architecture diagram (Phase 3, Track G) -->
+<!-- generated (Phase 3, Track G) from docker-compose.yml, Makefile and docs/CONTRACTS.md §7 -->
 
-- Three services from one image: `mock` (FastAPI + SQLite), `mcp` (FastMCP, streamable HTTP),
-  `agent` (FastAPI + LangGraph). Jaeger is optional (compose profile `observability`).
-- Two networks: `agent_net` (agent ↔ mcp) and `mock_net` (mcp ↔ mock). The agent has no
-  route to the mock and no mock token. Tests:
+```mermaid
+flowchart LR
+  browser["Browser<br/>web/index.html"]
+  host["Host shell<br/>make seed / chaos-on / chaos-off"]
+  claude["Claude API<br/>MODEL_PROVIDER=anthropic"]
+  traces[("./traces/*.jsonl<br/>bind mount")]
+
+  subgraph compose["docker compose: one image helpdesk:local"]
+    agent["agent<br/>FastAPI + LangGraph<br/>127.0.0.1:8080"]
+    agent_e2e["agent-e2e, profile e2e<br/>MODEL_PROVIDER=fake<br/>127.0.0.1:8081"]
+    mcp["mcp<br/>FastMCP, streamable HTTP<br/>127.0.0.1:8001, path /mcp"]
+    mock["mock<br/>FastAPI + SQLite<br/>:8000, no published port"]
+    jaeger["jaeger, profile observability<br/>UI 127.0.0.1:16686, OTLP :4318"]
+  end
+
+  browser -->|"HTTP + SSE: /, /chat, /chat/stream, /sessions"| agent
+  agent -->|"model calls, ANTHROPIC_API_KEY"| claude
+  agent -->|"agent_net: MCP over HTTP, http://mcp:8001/mcp"| mcp
+  agent_e2e -->|"agent_net: MCP over HTTP"| mcp
+  mcp -->|"mock_net: REST, Bearer MOCK_API_TOKEN"| mock
+  host -.->|"docker compose exec mock"| mock
+
+  agent -.->|"spans"| traces
+  agent_e2e -.->|"spans, traces/e2e/"| traces
+  mcp -.->|"spans"| traces
+  mock -.->|"spans"| traces
+  agent -.->|"OTLP, only with make up OBS=1"| jaeger
+  mcp -.->|"OTLP, only with make up OBS=1"| jaeger
+  mock -.->|"OTLP, only with make up OBS=1"| jaeger
+  browser -.->|"trace link, when JAEGER_UI_URL is set"| jaeger
+```
+
+- Services from one image (`Dockerfile`, `image: helpdesk:local`):
+  - `mock` (FastAPI + SQLite), `mcp` (FastMCP, streamable HTTP), `agent` (FastAPI + LangGraph).
+  - `agent-e2e` (compose profile `e2e`): the `agent` command with `MODEL_PROVIDER=fake`,
+    script `tests/e2e/fixtures` mounted read-only, its own volume `agent_e2e_data`,
+    `TRACES_DIR=/app/traces/e2e`. Started by `make test-e2e`.
+  - `jaeger` (`jaegertracing/jaeger:2.22.0`, profile `observability`): started by `make up OBS=1`.
+- Two networks: `agent_net` (agent, agent-e2e ↔ mcp) and `mock_net` (mcp ↔ mock). Jaeger is
+  on both. The agent has no route to the mock and no mock token. Tests:
   - `tests/integration/test_compose_isolation.py`
   - `tests/e2e/test_network_isolation.py`
-- Ports, all on loopback only: agent 8080, mcp 8001, Jaeger UI 16686. The mock publishes
-  no port.
+- Ports, all on loopback only: agent 8080, agent-e2e 8081, mcp 8001, Jaeger UI 16686. The
+  mock publishes no port; `make seed`, `make chaos-on` and `make chaos-off` run inside the
+  mock container (`docker compose exec mock`).
+- Secrets per service (explicit `environment:` lists, no `env_file`):
+  - mock: `MOCK_API_TOKEN`, `MOCK_ADMIN_TOKEN`
+  - mcp: `MOCK_API_TOKEN`
+  - agent: model keys only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`); agent-e2e: none
+- Volumes: `mock_data` (`mock.sqlite`), `agent_data` (`checkpoints.sqlite`, `store.sqlite`),
+  `agent_e2e_data`.
 
 ## c. Agent design
 
@@ -71,8 +119,51 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
 
 <!-- HUMAN: write this -->
 
-- Graph: `load_context → agent → {tools | propose → approval (interrupt) → execute_write | record_decline} → agent`
-  ([CONTRACTS §5](docs/CONTRACTS.md#5-graph-track-c)).
+<!-- generated (Phase 3, Track G) from src/helpdesk/agent/graph.py, routing.py and nodes.py; cross-checked with docs/CONTRACTS.md §5.1 -->
+
+```mermaid
+flowchart TD
+  g_start(["START"])
+  g_end(["END"])
+  load_context["load_context<br/>user facts from the Store, system prompt"]
+  agent["agent<br/>model call"]
+  tools["tools<br/>one ToolMessage per call"]
+  propose["propose<br/>action_id + idempotency_key, uuid4"]
+  approval["approval<br/>interrupt(pending_action) only"]
+  execute_write["execute_write<br/>MCP write: injected user id + stored key"]
+  record_decline["record_decline<br/>declined ToolMessage"]
+
+  g_start --> load_context
+  load_context --> agent
+  agent -->|"no tool calls"| g_end
+  agent -->|"exactly one complete write call"| propose
+  agent -->|"anything else: reads, remember_fact, rejected or invalid calls"| tools
+  tools --> agent
+  propose -->|"pending_action set"| approval
+  propose -->|"invalid write args: INVALID_ARGUMENT, no pending_action"| agent
+  approval -->|"Command goto: approve with this action_id"| execute_write
+  approval -->|"Command goto: decline, or any other resume value"| record_decline
+  execute_write --> agent
+  record_decline --> agent
+```
+
+- Edges: `route_after_agent` and `route_after_propose` in `src/helpdesk/agent/routing.py`;
+  `approval` routes with `Command(goto=...)` (`src/helpdesk/agent/nodes.py`), declared via
+  `destinations` in `src/helpdesk/agent/graph.py`.
+- `→ propose` needs exactly one tool call, a write, with no `invalid_tool_calls` and a reply
+  not cut off at the output limit (`proposable` in `routing.py`).
+- Only a well-formed resume value with `approve: true` and the pending `action_id` reaches
+  `execute_write`; any other value takes the decline path (`approves` in
+  `src/helpdesk/agent/decision.py`).
+- Differences from the [CONTRACTS §5.1](docs/CONTRACTS.md#5-graph-track-c) topology drawing
+  (the code is drawn above):
+  - `propose → agent` exists in the code (invalid write args); §5.1 does not draw it. §5.3
+    describes the case (error `ToolMessage`, no pending action) without naming the next node.
+  - Rejected batches (more than one write, or a write mixed with other calls), invalid,
+    unknown and cut-off calls go `agent → tools → agent`, where `tools` answers each call
+    with an error `ToolMessage`. §5.1 draws only reads and `remember_fact` into `tools`;
+    §5.3 says "Then → agent".
+  - A single write in a reply cut off at the output limit goes to `tools`, not `propose`.
 - Checkpointer: `AsyncSqliteSaver`, file `data/checkpoints.sqlite`. A pending approval
   survives a restart.
 - The idempotency key is created only in `propose`. A resumed `execute_write` reuses it.
@@ -108,7 +199,9 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
 
 - Errors come back as MCP tool errors (`isError: true`) with the text
   `ERROR <CODE>: <what happened>. Next step: <what to do>.`
-- Codes: `NOT_FOUND`, `INVALID_ARGUMENT`, `CONFLICT`, `UPSTREAM_UNAVAILABLE`, `TIMEOUT`, `AUTH`.
+- Codes (`ErrorCode` in `src/helpdesk/shared/errors.py`): `NOT_FOUND`, `INVALID_ARGUMENT`,
+  `CONFLICT`, `UPSTREAM_UNAVAILABLE`, `TIMEOUT`, `AUTH`, `INTERNAL` (a bug in our own code; not
+  retried).
 - Retry layers:
   - **One tool retry layer**, the MCP server's retry module: at most 3 attempts, full-jitter
     backoff, `Retry-After` capped at 5 s, 5 s per attempt, 15 s per tool call.
@@ -157,7 +250,8 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
 
 <!-- HUMAN: write this -->
 
-- OpenTelemetry spans from all three services go to `traces/<service>.jsonl`, plus OTLP to
+- OpenTelemetry spans from all three services go to `traces/<service>.jsonl` (`agent.jsonl`,
+  `mcp.jsonl`, `mock.jsonl`; `agent-e2e` writes `traces/e2e/agent.jsonl`), plus OTLP to
   Jaeger with `make up OBS=1`.
 - Traced: model calls (tokens incl. cache read/write, latency), tool calls (args, truncated
   result, error code, attempts), retry events, approvals
@@ -180,6 +274,30 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
   - pydantic models at every boundary
   - conventional commits
   - `uv.lock` committed
+- Local gates (no CI config in the repo):
+  - `make lint`: `ruff check .` + `ruff format --check .`
+  - `make typecheck`: `mypy` with `strict = true`, `files = ["src"]`, the `pydantic.mypy`
+    plugin and `warn_unreachable` (`pyproject.toml`)
+  - `make test`: `pytest tests/unit tests/integration`; `addopts` deselects the `e2e` and
+    `live` markers, with `--strict-markers` and `--strict-config`
+  - `make test-e2e`: `pytest -m e2e tests/e2e` against the compose stack
+- ruff: rule sets `E W F I N UP B SIM RUF ASYNC PT S T20 PL TID`, line length 100,
+  relative imports banned, `target-version = "py314"` (`pyproject.toml`).
+- pre-commit (`.pre-commit-config.yaml`, installed by `make setup`):
+  - local hooks through `uv run`, so they use the versions in `uv.lock`: `ruff check --fix`,
+    `ruff format`, `mypy`
+  - `pre-commit-hooks` v6.0.0: `detect-private-key`, `check-added-large-files`, `check-yaml`,
+    `end-of-file-fixer`, `trailing-whitespace` (the last two skip `CLAUDE.md`, `PLAN.md` and
+    `web/fixtures/*.sse`)
+- Unit tests use fake models and respx; nothing in `make test` calls a model API.
+- Snapshot of the MCP tool list and schemas: `tests/unit/mcp_server/test_tool_schemas.py`,
+  `tests/unit/mcp_server/snapshots/tool_list.json`.
+- Every `Settings` field is listed in `.env.example`, checked by
+  `tests/unit/shared/test_env_example.py`.
+- Secrets: `.env` is gitignored (`.gitignore`); `make setup` generates the mock tokens
+  (`scripts/init_env.py`) and never prints them.
+- Docker image: multi-stage, `uv sync --locked`, runs as non-root user `app` (uid 10001)
+  (`Dockerfile`).
 
 ## i. How AI tools were used
 
@@ -190,6 +308,25 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
 ## j. What I'd do differently with more time
 
 <!-- HUMAN: write this -->
+
+## Requirements traceability
+
+<!-- generated (Phase 3, Track G) from PLAN.md §8; every path checked with `ls` -->
+
+Paths under `src/helpdesk/` are shortened to `agent/`, `mcp_server/`, `mock/`, `telemetry/`,
+`shared/`.
+
+| # | Requirement | Code | Tests | Evals |
+|---|---|---|---|---|
+| 1 | HTTP endpoint, swappable model | `agent/api.py`, `agent/service.py`, `agent/model.py` | `tests/unit/agent/test_api.py`, `tests/unit/agent/test_model_factory.py`, `tests/e2e/test_happy_path.py` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 2 | MCP server, paginated search/read/write, token auth; agent reaches the mock only via MCP | `mcp_server/server.py`, `mcp_server/tools.py`, `mcp_server/mock_client.py`, `agent/mcp_provider.py`, `mock/search.py`, `mock/auth.py`, `docker-compose.yml` (networks) | `tests/unit/mcp_server/test_tools.py`, `tests/unit/mcp_server/test_tool_schemas.py`, `tests/unit/mcp_server/test_token_secrecy.py`, `tests/unit/mock/test_search.py`, `tests/unit/mock/test_auth.py`, `tests/unit/agent/test_mcp_provider.py`, `tests/integration/test_compose_isolation.py`, `tests/e2e/test_network_isolation.py` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 3 | Approval in the next message (button or text), survives restart, no double write | `agent/graph.py`, `agent/routing.py`, `agent/nodes.py`, `agent/proposal.py`, `agent/decision.py`, `agent/service.py`, `agent/locks.py`, `agent/persistence.py`, `shared/approval.py`, `mock/idempotency.py` | `tests/unit/agent/test_graph.py`, `tests/unit/agent/test_api.py`, `tests/unit/agent/test_restart.py`, `tests/unit/agent/test_locks.py`, `tests/unit/shared/test_approval.py`, `tests/unit/mock/test_idempotency.py`, `tests/e2e/test_restart.py` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 4 | Session and cross-session memory, isolation | `agent/memory.py`, `agent/history.py`, `agent/prompt.py`, `agent/persistence.py`, `shared/memory.py` | `tests/unit/agent/test_memory.py`, `tests/unit/agent/test_history.py` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 5 | Chaos, retry, timeout, no duplicate write | `mock/chaos.py`, `mock/idempotency.py`, `mcp_server/retry.py`, `mcp_server/errors.py` | `tests/unit/mock/test_chaos.py`, `tests/unit/mock/test_idempotency.py`, `tests/unit/mcp_server/test_retry.py`, `tests/unit/mcp_server/test_tools.py`, `tests/unit/mcp_server/test_tool_errors.py`, `tests/e2e/test_chaos.py` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 6 | Evals with one command | `evals/`, `Makefile` (`eval`, `eval-chaos`) | `make eval` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 7 | Traces | `telemetry/`, `shared/trace_attributes.py`, `scripts/show_trace.py` | `tests/unit/telemetry/test_span_tree.py`, `tests/unit/telemetry/test_show_trace.py`, `tests/unit/telemetry/test_redaction.py`, `tests/unit/agent/test_telemetry.py`, `tests/unit/mcp_server/test_tool_span.py`, `tests/unit/mock/test_telemetry.py`, `tests/integration/test_trace_propagation.py`, `tests/e2e/test_happy_path.py` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 8 | Web UI with tool calls and approve/decline | `web/index.html`, `agent/web_page.py` | `tests/unit/web/test_index_html.py`, `tests/unit/web/test_page_behaviour.py`, `tests/unit/web/test_sse_fixtures.py`, `tests/unit/agent/test_web_page.py`; manual: `scripts/demo.md` | evals/ (Phase 3 Track F; filled after the eval run) |
+| 9 | Streaming (optional) | `agent/stream.py`, `agent/tool_activity.py` | `tests/unit/agent/test_stream.py`, `tests/e2e/test_happy_path.py`, `tests/e2e/test_chaos.py` | evals/ (Phase 3 Track F; filled after the eval run) |
 
 ## Known limitations
 
@@ -216,7 +353,7 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
 <!-- HUMAN: write this -->
 
 - Screenshots / recording: [`docs/screenshots/`](docs/screenshots/)
-- Recording script: `scripts/demo.md` (Phase 3)
+- Recording script: [`scripts/demo.md`](scripts/demo.md)
 - Eval output: [`evals/results/latest.md`](evals/results/latest.md)
 
 ## Resolved versions
