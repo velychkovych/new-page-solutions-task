@@ -166,8 +166,14 @@ def _texts(root: Path) -> dict[str, str]:
     return {path.name: path.read_text(encoding="utf-8", errors="replace") for path in files}
 
 
-async def test_no_throwaway_token_reaches_a_trace_or_a_log(stacks: list[FakeStack]) -> None:
-    # Runs after the cases above (file order), so every service has written spans and logs.
+async def test_no_throwaway_token_reaches_a_trace_or_a_log(
+    stacks: list[FakeStack], client: httpx.AsyncClient
+) -> None:
+    # A case on every stack first, so every service has written spans and logs whatever
+    # ran before (or did not, with `-k` or `--lf`).
+    case = _case("status_question")
+    results = await asyncio.gather(*(run_case(case, stack, client, run=1) for stack in stacks))
+    assert all(result.passed for result in results), [result.reasons for result in results]
     for stack in stacks:
         texts = await asyncio.to_thread(_texts, stack.trace_dirs[0].parent)
         assert len(texts) == 6
