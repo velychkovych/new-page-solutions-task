@@ -1,21 +1,28 @@
-"""Builds the FastMCP server: four tools over streamable HTTP at /mcp, plus GET /health."""
+"""Builds the FastMCP server: four tools over streamable HTTP at /mcp, plus GET /health,
+and the ASGI app that serves it with telemetry (CONTRACTS §2.1, §6)."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.tools import Tool
 from opentelemetry import trace
 from opentelemetry.trace import Tracer
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from helpdesk.mcp_server.mock_client import MockApiClient
 from helpdesk.mcp_server.redaction import SecretRedactor
+from helpdesk.mcp_server.request_trace import CaptureTraceContext
 from helpdesk.mcp_server.tools import build_tools
 from helpdesk.shared.api import HealthResponse
 from helpdesk.shared.settings import Settings
+from helpdesk.telemetry import instrument_app, telemetry_lifespan
 
 SERVER_NAME = "helpdesk-tickets"
+TELEMETRY_SERVICE = "mcp"
 MCP_PATH = "/mcp"
 HEALTH_PATH = "/health"
 
@@ -55,3 +62,27 @@ def build_server(
     # decorator (an untyped decorator would make `health` untyped for mypy).
     server.custom_route(HEALTH_PATH, methods=["GET"])(health)
     return server
+
+
+def build_http_app(server: FastMCP[Any], settings: Settings) -> Starlette:
+    """The streamable-HTTP app, traced, and setting telemetry up whenever it starts.
+
+    FastMCP builds a plain Starlette app, so there is no `FastAPI(telemetry=...)` to pass.
+    Telemetry is chained into the app's own lifespan rather than wrapped around `serve()`,
+    so any server that runs the ASGI lifespan (uvicorn, or a test) gets it.
+    """
+    app = server.streamable_http_app()
+    app.add_middleware(CaptureTraceContext)
+    # Starlette 1.8.0 keeps the lifespan on the router and enters it on each ASGI
+    # lifespan startup; FastMCP's own lifespan runs the session manager.
+    session_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[Any]:
+        # Outermost, so spans are recorded for the app's whole life and flushed last.
+        async with telemetry_lifespan(TELEMETRY_SERVICE, settings), session_lifespan(app) as state:
+            yield state
+
+    app.router.lifespan_context = lifespan
+    instrument_app(app)
+    return app

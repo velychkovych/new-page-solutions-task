@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError, create_model
 
 from helpdesk.mcp_server.errors import ToolCallError, internal_error, invalid_arguments
 from helpdesk.mcp_server.redaction import SecretRedactor, truncate_utf8
+from helpdesk.mcp_server.request_trace import tool_span_parent
 from helpdesk.mcp_server.retry import OnRetry
 from helpdesk.shared import trace_attributes as attr
 
@@ -60,6 +61,16 @@ def retry_progress(context: ToolContext | None) -> OnRetry:
     return notify
 
 
+def _http_request(context: ToolContext | None) -> object | None:
+    if context is None:
+        return None
+    try:
+        return context.request_context.request
+    except ValueError:
+        # No MCP request in flight (the tool was called directly, e.g. in a test).
+        return None
+
+
 def text_result(text: str, *, is_error: bool) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], isError=is_error)
 
@@ -90,6 +101,7 @@ class ToolRunner[A: BaseModel]:
         started = time.perf_counter()
         with self._tracer.start_as_current_span(
             attr.SPAN_TOOL,
+            context=tool_span_parent(_http_request(context)),
             attributes={attr.TOOL_NAME: self.name, attr.TOOL_ATTEMPTS: 0},
         ) as span:
             try:

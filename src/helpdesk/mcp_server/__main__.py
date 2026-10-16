@@ -8,7 +8,7 @@ import uvicorn
 from helpdesk.mcp_server.mock_client import MockApiClient, create_mock_http_client
 from helpdesk.mcp_server.redaction import SecretRedactor
 from helpdesk.mcp_server.retry import RetryPolicy
-from helpdesk.mcp_server.server import build_server
+from helpdesk.mcp_server.server import build_http_app, build_server
 from helpdesk.shared.settings import MissingSecretError, Settings, require_secret
 
 
@@ -19,10 +19,15 @@ async def serve(settings: Settings) -> None:
         client = MockApiClient(http, RetryPolicy.from_settings(settings))
         server = build_server(settings, client, redactor=SecretRedactor([token]))
         config = uvicorn.Config(
-            server.streamable_http_app(),
+            build_http_app(server, settings),
             host=settings.mcp_host,
             port=settings.mcp_port,
             log_level=settings.log_level.lower(),
+            # The lifespan sets up telemetry and runs the session manager. With "auto",
+            # uvicorn 0.54 takes an error raised before Starlette reports startup.failed
+            # (e.g. while building the middleware stack) as "lifespan unsupported" and
+            # serves on without either.
+            lifespan="on",
         )
         await uvicorn.Server(config).serve()
 

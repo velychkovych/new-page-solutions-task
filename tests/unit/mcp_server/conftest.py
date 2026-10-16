@@ -121,7 +121,9 @@ def make_server(
     uniform: RecordingUniform,
     tracer: Tracer,
 ) -> ServerFactory:
-    def factory(settings: Settings | None = None) -> FastMCP[Any]:
+    def factory(settings: Settings | None = None, *, global_tracer: bool = False) -> FastMCP[Any]:
+        """`global_tracer=True` uses the process tracer, as the real server does, so spans
+        go to whichever telemetry setup is active instead of the in-memory exporter."""
         settings = settings or make_settings()
         http = create_mock_http_client(
             settings, TOKEN, transport=httpx.MockTransport(mock_api.async_handler)
@@ -133,7 +135,12 @@ def make_server(
             sleep=clock.sleep,
             uniform=uniform,
         )
-        return build_server(settings, client, redactor=SecretRedactor([TOKEN]), tracer=tracer)
+        return build_server(
+            settings,
+            client,
+            redactor=SecretRedactor([TOKEN]),
+            tracer=None if global_tracer else tracer,
+        )
 
     return factory
 
