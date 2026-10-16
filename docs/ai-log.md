@@ -706,7 +706,7 @@ after `docker compose restart` therefore continues the script.
     the exact contract text.
   - Calls go through `ClientSession.send_request(CallToolRequest)`, not `call_tool`, so no
     `tools/list` follows a write.
-- **One MCP session per tool call:** each call makes about 6 HTTP requests (about 23 ms on
+- **One MCP session per tool call:** each call makes about 5 HTTP requests (initialize, initialized, tools/call, a GET stream, DELETE; about 23 ms on
   localhost). This is the cost of correct trace context (see library notes).
 - **Client timeout:** `TOOL_DEADLINE_S + TOOL_ATTEMPT_TIMEOUT_S` (20 s), longer than the
   server's 15 s deadline, so the server's own `TIMEOUT` text arrives first. No new Setting.
