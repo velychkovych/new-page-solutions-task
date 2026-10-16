@@ -24,6 +24,9 @@ from helpdesk.shared.tickets import ChaosConfig, WritesReport
 
 SERVICE = "agent-eval"
 PROFILE = "eval"
+# Shared with the browser agent and started by `make up`, maybe with other settings
+# (`make up OBS=1`): the runner never starts or recreates them.
+SHARED_SERVICES = ("mock", "mcp")
 AGENT_URL = "http://127.0.0.1:8082"
 TRACE_DIRS = (ROOT / "traces", ROOT / "traces" / "eval")
 HEALTH_TIMEOUT_S = 60.0
@@ -46,6 +49,26 @@ def up_env(model: str | None) -> dict[str, str]:
     return env
 
 
+def unhealthy_services(ps_json: str, wanted: Sequence[str]) -> list[str]:
+    """The services of `wanted` that `docker compose ps --format json` does not show as
+    running and healthy. Compose prints one object per line (an array before v2.21)."""
+    text = ps_json.strip()
+    rows: list[object] = []
+    if text.startswith("["):
+        parsed = json.loads(text)
+        rows = parsed if isinstance(parsed, list) else []
+    elif text:
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    healthy = {
+        row.get("Service")
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("State") == "running"
+        and row.get("Health") == "healthy"
+    }
+    return [name for name in wanted if name not in healthy]
+
+
 class LiveStack:
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(timeout=5)
@@ -63,11 +86,27 @@ class LiveStack:
         return TRACE_DIRS
 
     async def start(self, model: str | None) -> None:
+        await self._check_shared_services()
+        # --no-deps: `up` would otherwise recreate mock and mcp whenever their settings
+        # differ from how `make up` started them, under the browser agent's feet.
         result = await run_command(
-            compose_args("up", "-d", "--wait", SERVICE), env=up_env(model), timeout_s=UP_TIMEOUT_S
+            compose_args("up", "-d", "--wait", "--no-deps", SERVICE),
+            env=up_env(model),
+            timeout_s=UP_TIMEOUT_S,
         )
         checked(result, f"docker compose up {SERVICE} (is the stack built? run `make up`)")
         await self._wait_healthy()
+
+    async def _check_shared_services(self) -> None:
+        out = checked(
+            await run_command(compose_args("ps", "--format", "json", *SHARED_SERVICES)),
+            "docker compose ps",
+        )
+        if down := unhealthy_services(out, SHARED_SERVICES):
+            raise StackError(
+                f"{' and '.join(down)} not running and healthy; start the stack with"
+                " `make up` first (the evals never start or recreate it)"
+            )
 
     async def close(self) -> None:
         await self._client.aclose()
