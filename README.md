@@ -22,8 +22,8 @@ make seed             # reset the mock DB to the 15 seed tickets
 open http://localhost:8080
 make up OBS=1         # same, plus Jaeger UI on http://localhost:16686
 make lint typecheck test
-make test-e2e         # needs `make up`; starts agent-e2e (fake model) on :8081
-make eval             # live evals with a real model (costs money), 3 repeats
+make test-e2e         # needs `make up`; starts agent-e2e (fake model) on :8081 and agent-eval on :8082
+make eval             # needs `make up`; live evals on agent-eval (:8082), real model (costs money), 3 repeats
 make chaos-on         # / make chaos-off — mock failure injection for the demo
 make trace ID=<trace_id>
 make down
@@ -51,27 +51,35 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
 ```mermaid
 flowchart LR
   browser["Browser<br/>web/index.html"]
-  host["Host shell<br/>make seed / chaos-on / chaos-off"]
+  host["Host shell<br/>make seed / chaos-on / chaos-off / eval"]
   claude["Claude API<br/>MODEL_PROVIDER=anthropic"]
   traces[("./traces/*.jsonl<br/>bind mount")]
 
-  subgraph compose["docker compose: one image helpdesk:local"]
-    agent["agent<br/>FastAPI + LangGraph<br/>127.0.0.1:8080"]
-    agent_e2e["agent-e2e, profile e2e<br/>MODEL_PROVIDER=fake<br/>127.0.0.1:8081"]
-    mcp["mcp<br/>FastMCP, streamable HTTP<br/>127.0.0.1:8001, path /mcp"]
-    mock["mock<br/>FastAPI + SQLite<br/>:8000, no published port"]
-    jaeger["jaeger, profile observability<br/>UI 127.0.0.1:16686, OTLP :4318"]
+  subgraph compose["docker compose"]
+    subgraph image["services built from image helpdesk:local"]
+      agent["agent<br/>FastAPI + LangGraph<br/>127.0.0.1:8080"]
+      agent_e2e["agent-e2e, profile e2e<br/>MODEL_PROVIDER=fake<br/>127.0.0.1:8081"]
+      agent_eval["agent-eval, profile eval<br/>real model<br/>127.0.0.1:8082"]
+      mcp["mcp<br/>FastMCP, streamable HTTP<br/>127.0.0.1:8001, path /mcp"]
+      mock["mock<br/>FastAPI + SQLite<br/>:8000, no published port"]
+    end
+    jaeger["jaeger, profile observability<br/>image jaegertracing/jaeger:2.22.0<br/>UI 127.0.0.1:16686, OTLP :4318"]
   end
 
   browser -->|"HTTP + SSE: /, /chat, /chat/stream, /sessions"| agent
   agent -->|"model calls, ANTHROPIC_API_KEY"| claude
+  agent_eval -->|"model calls, ANTHROPIC_API_KEY"| claude
   agent -->|"agent_net: MCP over HTTP, http://mcp:8001/mcp"| mcp
   agent_e2e -->|"agent_net: MCP over HTTP"| mcp
+  agent_eval -->|"agent_net: MCP over HTTP"| mcp
   mcp -->|"mock_net: REST, Bearer MOCK_API_TOKEN"| mock
-  host -.->|"docker compose exec mock"| mock
+  host -.->|"docker compose exec mock: seed, chaos, writes"| mock
+  host -->|"make eval: POST /chat"| agent_eval
+  host -.->|"make eval: docker compose exec, facts"| agent_eval
 
   agent -.->|"spans"| traces
   agent_e2e -.->|"spans, traces/e2e/"| traces
+  agent_eval -.->|"spans, traces/eval/"| traces
   mcp -.->|"spans"| traces
   mock -.->|"spans"| traces
   agent -.->|"OTLP, only with make up OBS=1"| jaeger
@@ -85,20 +93,30 @@ flowchart LR
   - `agent-e2e` (compose profile `e2e`): the `agent` command with `MODEL_PROVIDER=fake`,
     script `tests/e2e/fixtures` mounted read-only, its own volume `agent_e2e_data`,
     `TRACES_DIR=/app/traces/e2e`. Started by `make test-e2e`.
-  - `jaeger` (`jaegertracing/jaeger:2.22.0`, profile `observability`): started by `make up OBS=1`.
-- Two networks: `agent_net` (agent, agent-e2e ↔ mcp) and `mock_net` (mcp ↔ mock). Jaeger is
-  on both. The agent has no route to the mock and no mock token. Tests:
-  - `tests/integration/test_compose_isolation.py`
-  - `tests/e2e/test_network_isolation.py`
-- Ports, all on loopback only: agent 8080, agent-e2e 8081, mcp 8001, Jaeger UI 16686. The
-  mock publishes no port; `make seed`, `make chaos-on` and `make chaos-off` run inside the
-  mock container (`docker compose exec mock`).
+  - `agent-eval` (compose profile `eval`): the `agent` command with the agent's model
+    settings (real model, `ANTHROPIC_API_KEY`), its own volume `agent_eval_data`,
+    `TRACES_DIR=/app/traces/eval`. `make eval MODEL=<name>` sets its `MODEL_NAME`.
+    - Started by `make eval` / `make eval-chaos` (`docker compose up --no-deps`: `mock` and
+      `mcp` must already be running and healthy from `make up`) and by `make test-e2e`.
+- Not from that image: `jaeger` (`jaegertracing/jaeger:2.22.0`, profile `observability`),
+  started by `make up OBS=1`.
+- Two networks: `agent_net` (agent, agent-e2e, agent-eval ↔ mcp) and `mock_net`
+  (mcp ↔ mock). Jaeger is on both. The agents have no route to the mock and no mock token.
+  Tests:
+  - `tests/integration/test_compose_isolation.py` (agent, agent-e2e and agent-eval)
+  - `tests/e2e/test_network_isolation.py` (agent, agent-e2e and agent-eval)
+  - `tests/integration/evals/test_compose_service.py` (agent-eval)
+- Ports, all on loopback only: agent 8080, agent-e2e 8081, agent-eval 8082, mcp 8001, Jaeger
+  UI 16686. The mock publishes no port; `make seed`, `make chaos-on`, `make chaos-off` and
+  the eval runner's mock admin calls run inside the mock container (`docker compose exec
+  mock`).
 - Secrets per service (explicit `environment:` lists, no `env_file`):
   - mock: `MOCK_API_TOKEN`, `MOCK_ADMIN_TOKEN`
   - mcp: `MOCK_API_TOKEN`
-  - agent: model keys only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`); agent-e2e: none
+  - agent, agent-eval: model keys only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`); agent-e2e:
+    none
 - Volumes: `mock_data` (`mock.sqlite`), `agent_data` (`checkpoints.sqlite`, `store.sqlite`),
-  `agent_e2e_data`.
+  `agent_e2e_data`, `agent_eval_data`.
 
 ## c. Agent design
 
@@ -251,8 +269,8 @@ flowchart TD
 <!-- HUMAN: write this -->
 
 - OpenTelemetry spans from all three services go to `traces/<service>.jsonl` (`agent.jsonl`,
-  `mcp.jsonl`, `mock.jsonl`; `agent-e2e` writes `traces/e2e/agent.jsonl`), plus OTLP to
-  Jaeger with `make up OBS=1`.
+  `mcp.jsonl`, `mock.jsonl`; `agent-e2e` writes `traces/e2e/agent.jsonl`, `agent-eval`
+  writes `traces/eval/agent.jsonl`), plus OTLP to Jaeger with `make up OBS=1`.
 - Traced: model calls (tokens incl. cache read/write, latency), tool calls (args, truncated
   result, error code, attempts), retry events, approvals
   ([CONTRACTS §6](docs/CONTRACTS.md#6-traces-track-e-plan-6)).
