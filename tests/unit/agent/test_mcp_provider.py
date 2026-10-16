@@ -7,6 +7,7 @@ Nothing opens a socket.
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -433,12 +434,46 @@ async def test_unreachable_server_is_a_transport_error(
         await broken.list_tools()
 
 
-async def test_transport_error_message_holds_no_arguments() -> None:
-    broken = McpToolProvider(MCP_URL, timeout_s=5.0, httpx_client_factory=_failing_factory(_refuse))
-    with pytest.raises(ToolTransportError) as caught:
-        await broken.call("add_comment", {"ticket_id": "INC-0003", "body": "secret-ish text"})
+def _refuse_quoting_the_body(request: httpx.Request) -> httpx.Response:
+    """Answers initialize, then fails with a message that quotes what was sent, as some
+    transport errors do; so the tools/call failure quotes the arguments."""
+    message = json.loads(request.content) if request.method == "POST" else {}
+    if "id" in message and message.get("method") == "initialize":
+        result = {
+            "protocolVersion": message["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "quoting", "version": "0"},
+        }
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": message["id"], "result": result},
+            headers={"mcp-session-id": "s1"},
+        )
+    if message and "id" not in message:
+        return httpx.Response(202)
+    raise httpx.ConnectError(f"refused while sending {request.content!r}", request=request)
+
+
+async def test_transport_error_message_holds_no_arguments(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    broken = McpToolProvider(
+        MCP_URL, timeout_s=5.0, httpx_client_factory=_failing_factory(_refuse_quoting_the_body)
+    )
+    with caplog.at_level(logging.DEBUG, logger="helpdesk.agent.mcp_provider"):
+        with pytest.raises(ToolTransportError) as caught:
+            await broken.call("add_comment", {"ticket_id": "INC-0003", "body": "secret-ish text"})
+        with pytest.raises(ToolTransportError) as listed:
+            await broken.list_tools()
     assert "secret-ish text" not in str(caught.value)
+    assert "refused while sending" not in str(caught.value)
+    assert "refused while sending" not in str(listed.value)
     assert "add_comment" in str(caught.value)
+    provider_logs = [r for r in caplog.records if r.name == "helpdesk.agent.mcp_provider"]
+    assert provider_logs
+    for record in provider_logs:
+        assert "secret-ish text" not in record.getMessage()
+        assert "refused while sending" not in record.getMessage()
 
 
 async def test_a_server_that_never_answers_is_cut_off_by_the_client_timeout(
