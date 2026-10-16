@@ -123,10 +123,13 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name.upper(), raising=False)
 
 
-def make_settings(**overrides: Any) -> Settings:
+def make_settings(traces_dir: Path, **overrides: Any) -> Settings:
+    # Every app started here sets up telemetry: spans go to a tmp dir, never to OTLP.
     values: dict[str, Any] = {
         "mock_api_token": SecretStr(API_TOKEN),
         "mock_admin_token": SecretStr(ADMIN_TOKEN),
+        "traces_dir": traces_dir,
+        "otel_exporter_otlp_endpoint": None,
         **overrides,
     }
     return Settings(_env_file=None, **values)
@@ -142,7 +145,7 @@ def mock_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MockFactory
         nonlocal counter
         counter += 1
         overrides.setdefault("mock_db_path", tmp_path / f"mock-{counter}.sqlite")
-        settings = make_settings(**overrides)
+        settings = make_settings(tmp_path / "traces", **overrides)
         clock, sleep = FakeClock(), RecordingSleep()
         app = create_app(settings, sleep=sleep, clock=clock)
         async with (

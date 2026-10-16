@@ -15,6 +15,9 @@ from helpdesk.mock.idempotency import IdempotentWriter
 from helpdesk.mock.seed import seed_database
 from helpdesk.mock.ticket_routes import Clock, TicketServices, build_ticket_router
 from helpdesk.shared.settings import Settings, require_secret
+from helpdesk.telemetry import fastapi_telemetry_config, instrument_app, telemetry_lifespan
+
+SERVICE_NAME = "mock"
 
 
 def _utc_now() -> datetime:
@@ -32,14 +35,18 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # Non-reset seed: fills a new database, leaves an existing one alone.
-        await seed_database(db_path)
-        yield
+        # Outermost: tracing is active before the first request, and its shutdown (which
+        # flushes the spans) runs after the last one, once everything inside has stopped.
+        async with telemetry_lifespan(SERVICE_NAME, settings):
+            # Non-reset seed: fills a new database, leaves an existing one alone.
+            await seed_database(db_path)
+            yield
 
     chaos = ChaosEngine(settings)
     app = FastAPI(
         title="Helpdesk mock ticketing API",
         lifespan=lifespan,
+        telemetry=fastapi_telemetry_config(),
         # Not part of the contract; also keeps every non-2xx body an ApiError.
         openapi_url=None,
         docs_url=None,
@@ -63,4 +70,6 @@ def create_app(
     # add_middleware prepends, so the last one added is outermost: auth runs before chaos.
     app.add_middleware(ChaosMiddleware, engine=chaos, sleep=sleep)
     app.add_middleware(AuthMiddleware, api_token=api_token, admin_token=admin_token)
+    # The server span wraps the whole stack, so 401/403 and chaos failures are traced too.
+    instrument_app(app)
     return app

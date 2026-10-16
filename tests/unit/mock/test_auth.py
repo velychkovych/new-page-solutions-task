@@ -110,11 +110,16 @@ def test_startup_refuses_without_tokens(tmp_path: Path, missing: str) -> None:
     tokens = {"mock_api_token": SecretStr("a"), "mock_admin_token": SecretStr("b")}
     for value in (None, SecretStr("")):
         settings = Settings(
-            _env_file=None, mock_db_path=tmp_path / "m.sqlite", **{**tokens, missing: value}
+            _env_file=None,
+            mock_db_path=tmp_path / "m.sqlite",
+            traces_dir=tmp_path / "traces",
+            otel_exporter_otlp_endpoint=None,
+            **{**tokens, missing: value},
         )
         with pytest.raises(MissingSecretError, match=missing.upper()):
             create_app(settings)
     assert not (tmp_path / "m.sqlite").exists()
+    assert not (tmp_path / "traces").exists()
 
 
 def test_entry_point_exits_without_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
