@@ -185,6 +185,15 @@ async def test_list_tools_strips_injected_args_from_properties_and_required(
         for injected in INJECTED_ARGS[tool]:
             assert injected not in json.dumps(schema["properties"])
             assert injected not in schema["required"]
+        # Nothing else of the full input shows either: its title and description say
+        # there are injected arguments, which would invite the model to send them.
+        expected = {
+            k: v
+            for k, v in visible_model.model_json_schema(by_alias=True).items()
+            if k not in ("title", "description")
+        }
+        assert schema == expected
+        assert "injected" not in json.dumps(schema).lower()
 
 
 async def test_list_tools_leaves_read_tool_schemas_whole(provider: McpToolProvider) -> None:

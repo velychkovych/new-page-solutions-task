@@ -68,12 +68,16 @@ def model_visible_schema(tool_name: str, schema: Mapping[str, Any]) -> dict[str,
     """`schema` without the arguments the agent injects (CONTRACTS §2.3).
 
     They go from `properties` and from `required`: a required argument the model cannot see
-    would make a strict client reject every call.
+    would make a strict client reject every call. The top-level title and description go
+    too: they name the full input and say it has injected arguments, which invites the
+    model to send them. The tool's own description still tells the model what it does.
     """
     visible: dict[str, Any] = copy.deepcopy(dict(schema))
     hidden = _INJECTED.get(tool_name, ())
     if not hidden:
         return visible
+    visible.pop("title", None)
+    visible.pop("description", None)
     properties = visible.get("properties")
     if isinstance(properties, dict):
         visible["properties"] = {k: v for k, v in properties.items() if k not in hidden}
