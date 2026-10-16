@@ -18,6 +18,35 @@ def test_defaults_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.recursion_limit == 25
 
 
+def test_judge_model_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_settings_env(monkeypatch)
+    settings = Settings(_env_file=None)
+    assert settings.judge_model_provider is ModelProvider.ANTHROPIC
+    assert settings.judge_model_name == "claude-haiku-5-5"
+    # The env example documents the same defaults.
+    from_example = Settings(_env_file=ROOT / ".env.example")
+    assert from_example.judge_model_provider is ModelProvider.ANTHROPIC
+    assert from_example.judge_model_name == "claude-haiku-5-5"
+
+
+def test_judge_model_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_settings_env(monkeypatch)
+    monkeypatch.setenv("JUDGE_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("JUDGE_MODEL_NAME", "some-judge")
+    settings = Settings(_env_file=None)
+    assert settings.judge_model_provider is ModelProvider.OPENAI
+    assert settings.judge_model_name == "some-judge"
+    # The agent's model is untouched by the judge settings.
+    assert settings.model_name == "claude-sonnet-5-5"
+
+
+def test_judge_model_rejects_an_unknown_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_settings_env(monkeypatch)
+    monkeypatch.setenv("JUDGE_MODEL_PROVIDER", "ollama")
+    with pytest.raises(ValueError, match="judge_model_provider"):
+        Settings(_env_file=None)
+
+
 def test_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv("CHAOS_ERROR_RATE", "0.25")

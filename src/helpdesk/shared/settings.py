@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     model_timeout_s: PositiveSeconds = 60.0
     # SDK retries for the *model* API (429/529). Tool retries live only in the MCP server.
     model_max_retries: Annotated[int, Field(ge=0, le=10)] = 2
+    # The eval judge (LLM-as-judge). Built by the same factory and reuses the MODEL_MAX_TOKENS,
+    # MODEL_TIMEOUT_S and MODEL_MAX_RETRIES limits; only the provider and name differ.
+    judge_model_provider: ModelProvider = ModelProvider.ANTHROPIC
+    judge_model_name: str = "claude-haiku-5-5"
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     aws_region: str | None = None
