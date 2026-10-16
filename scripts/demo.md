@@ -66,8 +66,17 @@ Notes on step 5 (why the retries are expected):
 - So when the approved write is the first mock request after `make chaos-on`: attempt 1 gets
   429 (`Retry-After: 1`), attempt 2 gets 500, attempt 3 commits. One comment is written, under
   one idempotency key.
-- Any other mock request in between (another tab, a `make seed`) shifts the sequence. Run
-  `make chaos-on` again right before clicking **Approve**.
+- Any other ticket request to the mock in between shifts the sequence. Causes:
+  - a message sent from another tab or session (its tool calls reach the mock through MCP);
+  - `make test-e2e`, which talks to the same mock and reconfigures chaos
+    (`tests/e2e/test_chaos.py`);
+  - `make eval` / `make eval-chaos`, which also turn chaos off, reset the mock DB before
+    every case, set each chaos case's own config, and leave chaos off at the end
+    (`evals/driver.py`, `evals/run.py`).
+- `make seed` does not shift it: it resets the DB inside the mock container, not over HTTP,
+  and `/health` and `/admin/*` are exempt from chaos (`is_chaos_exempt` in
+  `src/helpdesk/mock/chaos.py`).
+- Run `make chaos-on` again right before clicking **Approve**.
 
 ## Variant: a write that fails for good (honest failure, no write)
 
@@ -92,7 +101,8 @@ Screenshot: `04b-honest-failure.png`.
 
 ## Evals
 
-1. `make eval` (live model, costs money, `REPEATS=3` by default).
+1. `make eval` (live model, costs money, `REPEATS=3` by default). Needs `make up`; run it
+   after the recording, because it resets the mock DB the browser agent uses.
 2. Screenshot the terminal summary: `07-make-eval.png`.
 3. Commit the generated results: `evals/results/latest.md` and `evals/results/latest.json`.
 
