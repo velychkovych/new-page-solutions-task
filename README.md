@@ -286,7 +286,7 @@ flowchart TD
 
 - Followed:
   - ruff (lint + format)
-  - mypy `--strict` on `src/`
+  - mypy `--strict` on `src/` and `evals/`
   - pytest + pytest-asyncio + respx
   - pre-commit hooks
   - pydantic models at every boundary
@@ -294,7 +294,7 @@ flowchart TD
   - `uv.lock` committed
 - Local gates (no CI config in the repo):
   - `make lint`: `ruff check .` + `ruff format --check .`
-  - `make typecheck`: `mypy` with `strict = true`, `files = ["src"]`, the `pydantic.mypy`
+  - `make typecheck`: `mypy` with `strict = true`, `files = ["src", "evals"]`, the `pydantic.mypy`
     plugin and `warn_unreachable` (`pyproject.toml`)
   - `make test`: `pytest tests/unit tests/integration`; `addopts` deselects the `e2e` and
     `live` markers, with `--strict-markers` and `--strict-config`

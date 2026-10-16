@@ -35,13 +35,13 @@ lint: ## ruff check + format --check
 	uv run ruff check .
 	uv run ruff format --check .
 
-typecheck: ## mypy --strict on src/
+typecheck: ## mypy --strict on src/ and evals/
 	uv run mypy
 
 test: ## Unit + integration tests (no docker stack needed)
 	uv run pytest tests/unit tests/integration
 
-test-e2e: ## End-to-end tests; requires `make up`. Starts agent-e2e (fake model) on :8081 and agent-eval
+test-e2e: ## End-to-end tests; requires `make up`. Starts agent-e2e (fake model) on :8081 and agent-eval on :8082
 	$(COMPOSE_UP_ENV) docker compose $(COMPOSE_PROFILES_FLAG) --profile e2e --profile eval up -d --wait agent-e2e agent-eval
 	uv run pytest -m e2e tests/e2e
 
