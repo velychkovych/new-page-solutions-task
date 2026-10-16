@@ -1,5 +1,8 @@
 """The CLI: arguments, --list, exit codes and where results go (no stack is started)."""
 
+import subprocess
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +12,16 @@ from tests.unit.evals.conftest import make_case
 from evals import run as run_module
 from evals.report import Report, RunMetadata, build_report
 from evals.results import CaseRunResult
-from evals.run import EXIT_FAILED, EXIT_INFRA, EXIT_OK, FAKE_OUT, LIVE_OUT, main, parse_args
+from evals.run import (
+    EXIT_FAILED,
+    EXIT_INFRA,
+    EXIT_OK,
+    FAKE_OUT,
+    LIVE_OUT,
+    git_state,
+    main,
+    parse_args,
+)
 from evals.stack import StackError, Tier, mask_secrets
 from evals.traces import TokenUsage
 
@@ -120,3 +132,67 @@ def test_mask_secrets_hides_keys_and_named_secrets() -> None:
     assert "sk-ant" not in masked
     assert "s3cr3t-value" not in masked
     assert "a" * 40 not in masked
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def _repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    (repo / "evals" / "results").mkdir(parents=True)
+    (repo / "tracked.txt").write_text("a\n")
+    (repo / "evals" / "results" / "latest.md").write_text("old\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "x")
+    return repo
+
+
+async def test_git_state_ignores_the_results_directory(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "evals" / "results" / "latest.md").write_text("new\n")
+    (repo / "evals" / "results" / "fake").mkdir()
+    (repo / "evals" / "results" / "fake" / "latest.json").write_text("{}\n")
+    sha, dirty = await git_state(repo)
+    assert len(sha) == 12
+    assert not dirty
+
+
+async def test_git_state_sees_any_other_change(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("b\n")
+    assert (await git_state(repo))[1]
+
+
+async def test_the_git_state_is_taken_before_the_stack_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    async def fake_git_state() -> tuple[str, bool]:
+        order.append("git")
+        return "abc", False
+
+    @asynccontextmanager
+    async def fake_open_stack(*_: Any) -> AsyncIterator[None]:
+        order.append("stack")
+        yield None
+
+    async def no_cases(*_: Any) -> list[CaseRunResult]:
+        return []
+
+    monkeypatch.setattr(run_module, "git_state", fake_git_state)
+    monkeypatch.setattr(run_module, "open_stack", fake_open_stack)
+    monkeypatch.setattr(run_module, "run_cases", no_cases)
+    report = await run_module.evaluate_cases(
+        [make_case()],
+        fake=True,
+        model=None,
+        repeats=1,
+        chaos_only=False,
+        case_filter=[],
+        progress=lambda _: None,
+    )
+    assert order == ["git", "stack"]
+    assert report.metadata.git_sha == "abc"

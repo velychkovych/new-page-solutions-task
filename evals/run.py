@@ -35,6 +35,7 @@ from evals.stack import ROOT, Stack, StackError, Tier, run_command
 
 LIVE_OUT = ROOT / "evals" / "results"
 FAKE_OUT = LIVE_OUT / "fake"
+RESULTS_PATHSPEC = LIVE_OUT.relative_to(ROOT).as_posix()
 LIVE_REPEATS = 3
 FAKE_REPEATS = 1
 
@@ -70,9 +71,13 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-async def git_state() -> tuple[str, bool]:
-    sha = await run_command(["git", "rev-parse", "--short=12", "HEAD"])
-    status = await run_command(["git", "status", "--porcelain"])
+async def git_state(repo: Path = ROOT) -> tuple[str, bool]:
+    """The commit and whether the tree differs from it. evals/results is left out: the
+    runner writes there, and a run must not report its own (or an earlier run's) output."""
+    sha = await run_command(["git", "rev-parse", "--short=12", "HEAD"], cwd=repo)
+    status = await run_command(
+        ["git", "status", "--porcelain", "--", ".", f":(exclude){RESULTS_PATHSPEC}"], cwd=repo
+    )
     commit = sha.stdout.strip() if sha.returncode == 0 else "unknown"
     return commit, sha.returncode == 0 and bool(status.stdout.strip())
 
@@ -133,9 +138,10 @@ async def evaluate_cases(
     progress: Progress,
 ) -> Report:
     started = utc_now()
+    # Before the run: what was checked out when it started is what it measured.
+    sha, dirty = await git_state()
     async with open_stack(fake, model) as stack:
         results = await run_cases(stack, cases, repeats, progress)
-    sha, dirty = await git_state()
     metadata = RunMetadata(
         started_at=started,
         finished_at=utc_now(),
