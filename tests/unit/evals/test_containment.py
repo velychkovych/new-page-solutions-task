@@ -64,6 +64,28 @@ def test_deepeval_sees_the_containment_and_writes_nothing_where_it_runs(tmp_path
     assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
 
 
+def test_a_planted_keyfile_and_inherited_deepeval_variables_are_ignored(tmp_path: Path) -> None:
+    # deepeval merges `<cache folder>/.deepeval` into os.environ after evals has run; on a
+    # shared /tmp another user could plant one, Confident AI key included.
+    cwd, tmp = tmp_path / "cwd", tmp_path / "tmp"
+    cwd.mkdir()
+    home = tmp / DEEPEVAL_HOME.name
+    home.mkdir(parents=True)
+    (home / ".deepeval").write_text('{"confident_api_key": "planted-key"}', encoding="utf-8")
+    inherited = {"DEEPEVAL_UPDATE_WARNING_OPT_IN": "1", "CONFIDENT_BASE_URL": "http://x.invalid"}
+    result = _python(_PROBE, cwd, "CONFIDENT_API_KEY", *inherited, TMPDIR=str(tmp), **inherited)
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(result.stdout)
+    assert seen["hidden_dir"] == str(home)
+    assert seen["confident"] is False
+    assert seen["env"] == dict.fromkeys(["CONFIDENT_API_KEY", *inherited])
+
+
+def test_the_deepeval_folder_is_per_user() -> None:
+    if hasattr(os, "getuid"):
+        assert DEEPEVAL_HOME.name.endswith(f"-{os.getuid()}")
+
+
 def test_deepeval_imported_before_evals_is_refused(tmp_path: Path) -> None:
     # Contained by hand here, so this test sends no telemetry either.
     result = _python(
