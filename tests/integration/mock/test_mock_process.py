@@ -2,6 +2,7 @@
 and `python -m helpdesk.mock.seed --reset` run against it from a second process
 (what `make seed` and the eval runner do)."""
 
+import json
 import os
 import socket
 import subprocess
@@ -19,6 +20,8 @@ ADMIN_TOKEN = "integration-admin-token-0b7c"
 AUTH = {"Authorization": f"Bearer {API_TOKEN}"}
 ADMIN = {**AUTH, "X-Admin-Token": ADMIN_TOKEN}
 STARTUP_TIMEOUT_S = 20.0
+CALLER_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
+CALLER_SPAN_ID = "b7ad6b7169203331"
 
 
 def _free_port() -> int:
@@ -28,9 +31,15 @@ def _free_port() -> int:
 
 
 def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
-    # Only what the mock needs; nothing from the developer's environment or .env leaks in.
+    # Only what the mock needs; nothing from the developer's environment or .env leaks in,
+    # so no OTLP endpoint is set and spans go only to the tmp traces dir.
     base = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "SYSTEMROOT", "TMPDIR"}}
-    return {**base, "MOCK_DB_PATH": str(tmp_path / "data" / "mock.sqlite"), **extra}
+    return {
+        **base,
+        "MOCK_DB_PATH": str(tmp_path / "data" / "mock.sqlite"),
+        "TRACES_DIR": str(tmp_path / "process-traces"),
+        **extra,
+    }
 
 
 @dataclass
@@ -100,11 +109,14 @@ def test_refuses_to_start_without_tokens(tmp_path: Path) -> None:
         assert API_TOKEN not in result.stderr
         assert ADMIN_TOKEN not in result.stderr
     assert not (tmp_path / "data" / "mock.sqlite").exists()
+    assert not (tmp_path / "process-traces").exists()
 
 
 def test_serves_seeded_data_and_resets_from_another_process(server: Server) -> None:
     with httpx.Client(base_url=server.url, timeout=5) as client:
         assert client.get("/tickets").status_code == 401
+        traceparent = {"traceparent": f"00-{CALLER_TRACE_ID}-{CALLER_SPAN_ID}-01"}
+        assert client.get("/tickets/INC-0003", headers={**AUTH, **traceparent}).status_code == 200
         first = client.get("/tickets", params={"q": "network"}, headers=AUTH).json()
         assert len(first["items"]) == 5
         assert first["next_cursor"] is not None
@@ -149,3 +161,17 @@ def test_serves_seeded_data_and_resets_from_another_process(server: Server) -> N
     assert "GET /tickets" in output  # access logs are on, and still carry no token
     assert API_TOKEN not in output
     assert ADMIN_TOKEN not in output
+
+    # Telemetry was set up when the app started, and its shutdown flushed the spans.
+    traces = Path(server.env["TRACES_DIR"]) / "mock.jsonl"
+    raw = traces.read_text(encoding="utf-8")
+    assert API_TOKEN not in raw
+    assert ADMIN_TOKEN not in raw
+    records = [json.loads(line) for line in raw.splitlines()]
+    assert {r["service"] for r in records} == {"mock"}
+    assert not [r for r in records if "/health" in r["name"]]
+    (joined,) = [r for r in records if r["trace_id"] == CALLER_TRACE_ID]
+    assert joined["name"] == "GET /tickets/{ticket_id}"
+    assert joined["parent_span_id"] == CALLER_SPAN_ID
+    assert {"POST /tickets", "GET /admin/writes"} <= {r["name"] for r in records}
+    assert not (server.cwd / "traces").exists()
