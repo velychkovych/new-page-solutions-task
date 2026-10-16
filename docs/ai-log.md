@@ -843,6 +843,61 @@ after `docker compose restart` therefore continues the script.
 - Pass `on_progress` only on streamed runs, so /chat does not ask the MCP server for
   progress notifications. Today they are sent and dropped.
 
+## 2026-10-16 — Phase 3 / Track F: DeepEval rewrite, judge model, agent prompt fix
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+The work the author approved after the first live eval run (`17f4e31`), commits
+`8284b3b..556b466`. No live eval was run afterwards and no paid model API was called.
+
+### What changed
+
+| Commit | Change |
+|---|---|
+| `8284b3b` | `JUDGE_MODEL_PROVIDER` / `JUDGE_MODEL_NAME` in `Settings` (default `anthropic` / `claude-haiku-5-5`), listed in `.env.example`. |
+| `268f7f4` | `build_judge_model` in `src/helpdesk/agent/model.py`: the same `init_chat_model` path as the agent; `JUDGE_MODEL_PROVIDER=fake` raises `ModelConfigError`. |
+| `e7e547f` | Agent prompt: calling the write tool is the approval request; never ask for approval in plain text. Cause: in the first live run the model wrote the proposal as text and asked "Do you approve?", so no pending action existed. |
+| `edcab3f` | PLAN and CONTRACTS §7: judge scope (reply semantics only) and the judge factory. |
+| `2f52f80` | `deepeval` 4.3.0 in the dev group; `click` 8.5.0 -> 8.3.3 in the lock (deepeval pins `click<8.4`). `.deepeval/` gitignored. |
+| `d16e72d` | `evals/` scored through DeepEval: a `ConversationalGolden` per case, a `ConversationalTestCase` per run, every expectation key an `ExpectationMetric`, `judge:` entries as strict `ConversationalGEval`, `a_measure` instead of `evaluate()`, containment env in `evals/__init__.py`, not-exercised outcome, judge tokens reported apart. |
+| `191f6b5` | Judge metrics replace the positive reply-phrasing regexes of cases 3, 7, 12 and 13; the negative guards stay deterministic. |
+| `556b466` | PLAN: case-file judge keys and the not-exercised pass rate. |
+
+Docs pass afterwards: `fe48629` (README facts: env rows, judge, DeepEval scoring and
+containment, exit status, pytest `addopts`, deepeval version) and `3d817b9` (`make help`
+for `eval`). The README eval case table already matched `python -m evals.run --list`
+after `52d183f`.
+
+### Verified, and how
+
+- At `3d817b9`:
+  - `make lint`: `All checks passed!`, `187 files already formatted`
+  - `make typecheck`: `Success: no issues found in 97 source files`
+  - `make test`: `1317 passed, 11 warnings`
+  - `uv run python -m evals.run --fake --out <scratch>`: `Pass rate: 13/13 (100%)`, judge
+    `scripted-judge (provider: fake)`, judge tokens 0
+- `--list` output diffed line by line against the README case table: identical.
+- README `<!-- HUMAN: write this -->` markers: 23 before, 23 after.
+
+### Deviations from the plan
+
+- `pyproject.toml`: `addopts` disables the pytest plugins deepeval installs (`deepeval`,
+  `xdist`, `xdist.looponfail`, `repeat`, `rerunfailures`), and `filterwarnings` ignores
+  deepeval's `asyncio.iscoroutinefunction` `DeprecationWarning`.
+- The judge is built in the host process (`python -m evals.run`), which reads only the
+  judge's fields of `.env` (`evals.judges.JUDGE_FIELDS`, after `5f5bdc4`).
+- `JUDGE_MODEL_PROVIDER=fake` passes `Settings` validation but raises `ModelConfigError` in
+  the factory; the fake tier passes its own scripted judge.
+
+### Unsure — author should review
+
+- No live run since the prompt fix (`e7e547f`) or the DeepEval rewrite. The committed
+  `evals/results/latest.{json,md}` are from `17f4e31` (git `60da65296ad3`, 29/39) and use
+  the old report format.
+- The Haiku judge's agreement with a human reading of the replies is not measured.
+- The Phase 3 Track F/G commits before `17f4e31` (`be13fa3` .. `17f4e31`) have no ai-log
+  entry of their own.
+
 ## 2026-10-16 — Evals (DeepEval rewrite): review fixes
 
 ### Delegated to AI (Claude Code, Opus 5.5)
