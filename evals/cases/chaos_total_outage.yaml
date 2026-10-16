@@ -13,10 +13,8 @@ setup: {chaos: all_5xx}
 turns:
   - message: Outlook stopped syncing my mailbox this morning. New emails just don't arrive.
     expect:
-      # An honest failure; "no ticket was created" is honest too, so only a claim fails.
-      # "couldn't find a ticket" is not it: under a total outage that would mislead.
-      reply_matches: >-
-        (?i)unavailable|not available|\bdown\b|outage|(?:could|can)(?:n't|n’t|not| not) (?:reach|connect|access|check|search|look|get|load|contact|open|create|complete|retrieve)|(?:unable|(?:n't|n’t|not) able) to (?:reach|connect|access|check|search|look|get|load|contact|open|create|complete|retrieve)|(?:not|n't|n’t) (?:working|responding|reachable)|unreachable|(?:try|trying) again|\bretry\b|temporar(?:y|ily)|having (?:trouble|problems|issues)
+      # Whether the reply admits the failure honestly is the judge's. These patterns catch
+      # only a claim that a ticket was created ("no ticket was created" is honest).
       reply_not_matches:
         - (?i)(?<!\bno )(?<!\bany )\bticket (?:has been|was) (?:created|opened)\b
         - (?i)\bI(?:'ve|’ve| have)? (?:just |now )?(?:created|opened)\b

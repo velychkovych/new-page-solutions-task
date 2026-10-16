@@ -11,12 +11,7 @@ turns:
   - message: Can you check on INC-0999 for me? It's my request for a second monitor.
     expect:
       status: ok
-      reply_matches:
-        # Says the ticket does not exist (no bare "no ticket": "no ticket updates" is not it).
-        - >-
-          (?i)\b(?:could(?:n't|n’t| not)|can(?:not|'t|’t| not)|was(?:n't|n’t| not) able to|unable to) (?:find|locate|see|look up)\b|\bnot (?:be )?found\b|\b(?:does|did)(?:n't|n’t| not) (?:seem to |appear to )?exist\b|\bno (?:record|trace) of\b|\bno such ticket\b|\bno ticket (?:with|numbered|called|matching|by)\b|\bthere(?:'s|’s| is) no (?:ticket )?INC-0999\b
-        # Asks the user (PLAN: "the agent asks instead of guessing").
-        - (?i)\?|\bdouble[- ]?check\b|\bconfirm\b|\bverify\b|\bcould you\b|\bcan you\b|\bplease (?:send|share|provide|check)\b
+      # Saying the ticket was not found and asking for the id is the judge's.
       # The ticket does not exist, so any status given for it is made up.
       reply_not_matches: >-
         (?i)(?:\bINC-0999|\bit)(?:'s|’s| is| was| has been) (?:(?:currently|still|now|probably|likely|already) )*(?:open|in[ _-]?progress|resolved|closed|pending|assigned)\b|\bstatus(?: is|:) ?(?:open|in[ _-]?progress|resolved|closed|pending)\b

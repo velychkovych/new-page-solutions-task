@@ -11,11 +11,8 @@ turns:
   - message: What's happening with INC-0007? Any news on my laptop battery replacement?
     expect:
       status: ok
-      # Facts that only INC-0007 holds, never a word the user typed: its status (or its
-      # team), and its comment "Replacement battery ordered, ETA 3 working days."
-      reply_matches:
-        - (?i)\bin[ _-]?progress\b|\bbeing (worked on|handled)\b|\bendpoint[ _-]team\b
-        - (?i)\bordered\b|\bon order\b|\bETA\b|\b(3|three) (working|business) days\b
+      # Positive control: the ticket was read. Whether the reply uses its facts (status,
+      # the comment "Replacement battery ordered, ETA 3 working days.") is the judge's.
       tool_calls_include: [get_ticket]
 expect:
   tools_called_in_order_contains: [get_ticket]
