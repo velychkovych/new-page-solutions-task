@@ -471,6 +471,7 @@ Steps:
 - The live tier needs a real model key. The deterministic tier (fake model) runs in `make test`.
 - Cases and checks run through DeepEval: one `ConversationalTestCase` per run. Every deterministic check is a custom DeepEval metric that reads the trace and writes evidence. Judge metrics grade only the reply's meaning, never a safety property (approval, no write, no duplicate, isolation, injection).
 - A run whose first search already returned every match is reported "not exercised" for the pagination case (4), not passed or failed.
+- A case file's `judge:` lists its judge metrics (a name, explicit evaluation steps, and whether the judge sees the tool calls); `fake_judge:` scripts their verdicts for the deterministic tier (default pass). The pass rate is over the exercised runs, with the not-exercised count next to it. `make eval` prints the judge model and the judge's tokens apart from the agent's.
 
 **Track G — Docs skeleton and assets**
 
