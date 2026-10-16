@@ -8,7 +8,7 @@ from opentelemetry.util._once import Once
 from pydantic import SecretStr
 
 from helpdesk.shared.settings import Settings
-from helpdesk.telemetry import shutdown_telemetry
+from helpdesk.telemetry.setup import _reset_for_tests
 
 MOCK_API_TOKEN = "mock-api-token-4f8a2c9e1b7d"
 MOCK_ADMIN_TOKEN = "mock-admin-token-9c1e7a3f5b2d"
@@ -21,18 +21,21 @@ type MakeSettings = Callable[..., Settings]
 
 @pytest.fixture(autouse=True)
 def fresh_otel(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Give each test its own global tracer provider.
+    """Start each test as a fresh process would: no global provider, nothing instrumented.
 
     The OTel API allows `set_tracer_provider` once per process (a `Once` guard plus a
-    module global, see opentelemetry/trace/__init__.py); monkeypatch puts both back.
+    module global, see opentelemetry/trace/__init__.py); monkeypatch puts both back, so a
+    test can also see the delegating provider being installed, or install a foreign one.
     """
     monkeypatch.setattr(trace, "_TRACER_PROVIDER_SET_ONCE", Once())
     monkeypatch.setattr(trace, "_TRACER_PROVIDER", None)
-    # Keep a developer's shell from turning on OTLP export in unit tests.
+    # Keep a developer's shell from turning on OTLP export or FastAPI's own telemetry.
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("FASTAPI_OTEL_AUTO_CONFIGURE", raising=False)
     yield
-    # Undoes the process-singleton instrumentors so the next test starts clean.
-    shutdown_telemetry()
+    # Closes any setup whatever its user count, and undoes the process-singleton
+    # instrumentors, so other tests (and other tracks' tests) start clean.
+    _reset_for_tests()
 
 
 @pytest.fixture
