@@ -6,6 +6,7 @@ must follow the §4 ordering rules (`assert_contract_order`).
 """
 
 import asyncio
+import contextlib
 import json
 import operator
 import re
@@ -29,6 +30,7 @@ from pydantic import BaseModel
 
 from helpdesk.agent import turn_errors
 from helpdesk.agent.api import create_app
+from helpdesk.agent.locks import ThreadLocks
 from helpdesk.agent.service import STALE_DECISION_REPLY, reask_reply
 from helpdesk.agent.stream import REPLY_SEPARATOR, TurnEvents
 from helpdesk.agent.tool_activity import ToolStarted, progress_message, slow_tool_message
@@ -381,6 +383,31 @@ async def test_read_turn_streams_tools_then_text_then_done_with_the_request_trac
     assert request_span.attributes[attrs.REQUEST_STATUS] == "ok"
 
 
+async def test_streamed_proposal_and_approval_write_the_request_and_approval_spans(
+    make_client, provider, fake_model, make_ai, spans
+):
+    """The CONTRACTS §6 attributes on /chat/stream, as test_api.py checks them on /chat."""
+    model = fake_model(responses=_proposal_script(make_ai, make_ai("Created INC-0016.")))
+    client = await make_client(model, provider)
+
+    proposed = await _stream(client, message=PROPOSAL_MESSAGE)
+    (approval,) = named(proposed, SseEvent.APPROVAL_REQUIRED)
+    (proposal_span,) = [s for s in spans[1].get_finished_spans() if s.name == attrs.SPAN_REQUEST]
+    assert proposal_span.attributes[attrs.REQUEST_STATUS] == "awaiting_approval"
+    assert proposal_span.attributes[attrs.PENDING_ACTION_ID] == approval.action_id
+    assert proposed[-1].data.trace_id == format_trace_id(proposal_span.context.trace_id)
+
+    approved = await _stream(client, message="yes")
+
+    assert approved[-1].data.status is ChatStatus.OK
+    (write,) = provider.writes()
+    (approval_span,) = [s for s in spans[1].get_finished_spans() if s.name == attrs.SPAN_APPROVAL]
+    assert approval_span.attributes[attrs.APPROVAL_ACTION_ID] == approval.action_id
+    assert approval_span.attributes[attrs.APPROVAL_DECISION] == "approve"
+    assert approval_span.attributes[attrs.APPROVAL_IDEMPOTENCY_KEY] == write.idempotency_key
+    assert format_trace_id(approval_span.context.trace_id) == approved[-1].data.trace_id
+
+
 async def test_reask_turn_is_exact_on_the_wire(make_client, provider, fake_model, make_ai):
     client = await make_client(fake_model(responses=_proposal_script(make_ai)), provider)
     proposal = await _chat(client, message=PROPOSAL_MESSAGE)
@@ -516,6 +543,29 @@ async def test_unexpected_failure_still_ends_the_stream(make_client, provider, f
     assert "boom" not in response.text
 
 
+async def test_a_failure_before_the_turn_begins_still_ends_with_the_request_trace(
+    make_client, provider, fake_model, monkeypatch, spans
+):
+    """Before `begin`, `done` carries the trace id taken when the stream started."""
+
+    @contextlib.asynccontextmanager
+    async def broken_hold(self, key):
+        raise RuntimeError("lock registry broken")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ThreadLocks, "hold", broken_hold)
+    client = await make_client(fake_model(responses=[]), provider)
+
+    events = await _stream(client, message="hello")
+
+    assert [e.name for e in events] == [SseEvent.ERROR, SseEvent.DONE]
+    done = events[-1].data
+    assert done.status is ChatStatus.ERROR
+    assert done.trace_id != "0" * 32
+    (request_span,) = [s for s in spans[1].get_finished_spans() if s.name == attrs.SPAN_REQUEST]
+    assert done.trace_id == format_trace_id(request_span.context.trace_id)
+
+
 async def test_invalid_request_is_a_plain_422(make_client, provider, fake_model):
     model = fake_model(responses=[])
     client = await make_client(model, provider)
@@ -603,6 +653,26 @@ async def test_a_fast_tool_gets_no_notice(make_client, provider, fake_model, mak
     events = await _stream(client, message="Is there a VPN ticket?")
 
     assert named(events, SseEvent.STATUS) == []
+
+
+async def test_the_slow_notice_is_cancelled_when_the_tool_ends(
+    make_client, provider, fake_model, make_ai
+):
+    """The rest of the turn outlasts the notice delay; the tool did not."""
+    model = fake_model(
+        responses=[make_ai("", ("search_tickets", {"query": "vpn"}, "r1")), make_ai("Done.")],
+        delay_s=0.3,
+    )
+    client = await make_client(model, provider, slow_tool_notice_s=0.05)
+
+    events = await _stream(client, message="Is there a VPN ticket?")
+
+    assert [e.name for e in events] == [
+        SseEvent.TOOL_START,
+        SseEvent.TOOL_END,
+        SseEvent.TOKEN,
+        SseEvent.DONE,
+    ]
 
 
 async def test_chat_ignores_progress_and_slow_notices(make_client, provider, fake_model, make_ai):
