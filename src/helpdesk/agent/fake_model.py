@@ -3,6 +3,10 @@
 Built on FakeMessagesListChatModel because it does not stream, so LangGraph's
 "messages" stream mode falls back to a single invoke and tool calls survive.
 (GenericFakeChatModel drops tool calls when streamed.)
+
+The reply is chosen from the conversation, not from a counter in process memory, so an
+agent restarted between a proposal and its approval continues the script where the
+checkpointed conversation left off (tests/e2e/test_restart.py).
 """
 
 from collections.abc import Callable, Sequence
@@ -12,7 +16,7 @@ from typing import Any, override
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
@@ -59,8 +63,27 @@ def parse_script(text: str) -> list[ScriptedMessage]:
     return script
 
 
+def script_position(messages: Sequence[BaseMessage]) -> int:
+    """How many replies the model has given since the user's last message.
+
+    Every user message starts the script again; each tool round in the same turn moves
+    one step on. An approval adds no user message (the graph resumes), so the reply after
+    an approved write is the step after the proposal.
+    """
+    position = 0
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if isinstance(message, AIMessage):
+            position += 1
+    return position
+
+
 class ScriptedChatModel(FakeMessagesListChatModel):
-    """Replies with the scripted messages in order, cycling at the end."""
+    """Replies with script step `script_position(input)`, wrapping round past the end.
+
+    The inherited in-memory counter `i` is not used.
+    """
 
     @classmethod
     def from_script(cls, script: Sequence[ScriptedMessage]) -> ScriptedChatModel:
@@ -90,8 +113,8 @@ class ScriptedChatModel(FakeMessagesListChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        result = super()._generate(messages, stop, run_manager, **kwargs)
+        step = self.responses[script_position(messages) % len(self.responses)]
         # A fresh copy per reply: add_messages assigns ids in place, and a reused
-        # object would make a cycled reply replace the earlier one in the history.
-        message = result.generations[0].message.model_copy(deep=True, update={"id": None})
+        # object would make a repeated step replace the earlier one in the history.
+        message = step.model_copy(deep=True, update={"id": None})
         return ChatResult(generations=[ChatGeneration(message=message)])

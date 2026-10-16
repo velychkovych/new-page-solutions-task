@@ -5,11 +5,17 @@ import json
 import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_aws import ChatAnthropicBedrock
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from helpdesk.agent.fake_model import ScriptedChatModel, parse_script
+from helpdesk.agent.fake_model import ScriptedChatModel, parse_script, script_position
 from helpdesk.agent.memory import REMEMBER_FACT_DEFINITION
 from helpdesk.agent.model import ModelConfigError, build_chat_model
 from helpdesk.agent.prompt import system_message
@@ -116,12 +122,85 @@ async def test_scripted_model_keeps_tool_calls_when_streamed():
     assert len(chunks) == 1
     assert chunks[0].tool_calls[0]["name"] == "get_ticket"
     assert chunks[0].tool_calls[0]["args"] == {"ticket_id": "INC-0007"}
-    second = await model.ainvoke([HumanMessage("and?")])
-    assert second.content == "In progress."
-    again = await model.ainvoke([HumanMessage("cycle")])
+
+
+SCRIPT = [
+    {"tool_calls": [{"name": "search_tickets", "args": {"query": "printer"}, "id": "s"}]},
+    {"tool_calls": [{"name": "create_ticket", "args": {"title": "t"}, "id": "w"}]},
+    {"content": "Done."},
+]
+
+
+def _scripted() -> ScriptedChatModel:
+    return ScriptedChatModel.from_script(parse_script(json.dumps(SCRIPT)))
+
+
+def _step(model: ScriptedChatModel, step: int) -> AIMessage:
+    expected = model.responses[step]
+    assert isinstance(expected, AIMessage)
+    return expected
+
+
+async def test_scripted_model_replies_by_position_in_the_conversation():
+    model = _scripted()
+    history: list[BaseMessage] = [HumanMessage("printer jams")]
+    replies = []
+    for _ in range(3):
+        reply = await model.ainvoke(history)
+        replies.append(reply)
+        history.append(reply)
+        for call in reply.tool_calls:
+            history.append(ToolMessage("{}", tool_call_id=call["id"]))
+    assert [r.tool_calls for r in replies] == [_step(model, i).tool_calls for i in range(3)]
+    assert replies[2].content == "Done."
+
+
+async def test_every_user_message_starts_the_script_again():
+    model = _scripted()
+    first = await model.ainvoke([HumanMessage("one")])
+    history = [HumanMessage("one"), first, ToolMessage("{}", tool_call_id="s")]
+    history += [AIMessage("Done."), HumanMessage("two")]
+    again = await model.ainvoke(history)
+    assert again.tool_calls == first.tool_calls
+
+
+async def test_scripted_model_has_no_memory_between_instances():
+    # An approval resumes the graph without a user message. A new process (a restarted
+    # agent) must give the same next step as the one that made the proposal.
+    history: list[BaseMessage] = [HumanMessage("printer jams")]
+    history += [_step(_scripted(), 0), ToolMessage("{}", tool_call_id="s")]
+    history += [_step(_scripted(), 1), ToolMessage("{}", tool_call_id="w")]
+    before = _scripted()
+    await before.ainvoke([HumanMessage("unrelated")])
+    after = await _scripted().ainvoke(history)
+    assert after.content == "Done."
+    assert (await before.ainvoke(history)).content == "Done."
+
+
+async def test_scripted_model_wraps_round_past_the_end():
+    model = _scripted()
+    history: list[BaseMessage] = [HumanMessage("x"), *(AIMessage(f"r{i}") for i in range(3))]
+    wrapped = await model.ainvoke(history)
+    assert wrapped.tool_calls == _step(model, 0).tool_calls
+
+
+async def test_scripted_model_returns_a_fresh_message_each_time():
+    model = _scripted()
+    first = await model.ainvoke([HumanMessage("a")])
+    second = await model.ainvoke([HumanMessage("a")])
     # A fresh object every time, so add_messages never replaces an earlier reply.
-    assert again is not chunks[0]
-    assert again.id is None or again.id != chunks[0].id
+    assert second is not first
+    assert second.id is None or second.id != first.id
+    assert model.responses[0].id is None
+
+
+def test_script_position_counts_replies_since_the_last_user_message():
+    assert script_position([]) == 0
+    assert script_position([SystemMessage("sys"), HumanMessage("a")]) == 0
+    history = [HumanMessage("a"), AIMessage("1"), HumanMessage("b"), AIMessage("2")]
+    assert script_position([*history, ToolMessage("{}", tool_call_id="x")]) == 1
+    # No user message at all: every reply counts.
+    assert script_position([AIMessage("1"), AIMessage("2")]) == 2
 
 
 DEFINITIONS = [
