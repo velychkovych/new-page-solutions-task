@@ -14,14 +14,15 @@ from pydantic import JsonValue, ValidationError
 
 from helpdesk.shared import trace_attributes as ta
 from helpdesk.shared.settings import Settings, get_settings
+from helpdesk.telemetry.openinference_keys import (
+    LLM_MODEL_NAME,
+    LLM_TOKENS_CACHE_READ,
+    LLM_TOKENS_CACHE_WRITE,
+    LLM_TOKENS_COMPLETION,
+    LLM_TOKENS_PROMPT,
+)
 from helpdesk.telemetry.records import SpanEventRecord, SpanRecord
 
-# OpenInference LLM span keys (verified against openinference-instrumentation-langchain 0.1.79).
-LLM_MODEL_NAME = "llm.model_name"
-LLM_TOKENS_PROMPT = "llm.token_count.prompt"
-LLM_TOKENS_COMPLETION = "llm.token_count.completion"
-LLM_TOKENS_CACHE_READ = "llm.token_count.prompt_details.cache_read"
-LLM_TOKENS_CACHE_WRITE = "llm.token_count.prompt_details.cache_write"
 _EXCEPTION_EVENT = "exception"
 _MAX_DETAIL_CHARS = 160
 

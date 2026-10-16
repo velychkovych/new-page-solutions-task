@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 from opentelemetry import trace
@@ -186,16 +185,10 @@ async def test_show_trace_renders_the_fake_run(make_settings: Any) -> None:
     assert err.getvalue() == ""
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Open question: langchain-anthropic 1.7.6 moves cache writes to "
-        "input_token_details.ephemeral_5m/1h_input_tokens and sets cache_creation=0; "
-        "OpenInference 0.1.79 reads only cache_creation from usage_metadata, so on the "
-        "streaming path cache_write is not recorded"
-    ),
-)
 async def test_cache_write_recorded_with_ttl_breakdown(make_settings: Any) -> None:
+    # langchain-anthropic 1.7.6 puts cache writes in ephemeral_5m/1h_input_tokens and sets
+    # cache_creation=0; OpenInference 0.1.79 reads only cache_creation, so the count comes
+    # from the CacheWriteSpanProcessor that setup_telemetry installs.
     settings: Settings = make_settings()
     agent = setup_telemetry("agent", settings)
     reply = AIMessage(

@@ -16,11 +16,12 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from starlette.applications import Starlette
 
 from helpdesk.shared.settings import Settings, get_settings
+from helpdesk.telemetry.cache_write import CacheWriteSpanProcessor
 from helpdesk.telemetry.jsonl_exporter import JsonlSpanExporter
 from helpdesk.telemetry.redaction import RedactingSpanExporter, Redactor
 
@@ -85,18 +86,18 @@ def build_telemetry(service_name: str, settings: Settings) -> Telemetry:
     provider = TracerProvider(resource=Resource.create({SERVICE_NAME: service_name}))
 
     jsonl = RedactingSpanExporter(JsonlSpanExporter(settings.traces_dir, service_name), redactor)
-    provider.add_span_processor(
-        BatchSpanProcessor(jsonl, schedule_delay_millis=_JSONL_SCHEDULE_DELAY_MS)
-    )
     exporters = [jsonl]
-
+    processors: list[SpanProcessor] = [
+        BatchSpanProcessor(jsonl, schedule_delay_millis=_JSONL_SCHEDULE_DELAY_MS)
+    ]
     if settings.otel_exporter_otlp_endpoint:
         otlp = RedactingSpanExporter(
             OTLPSpanExporter(endpoint=otlp_traces_endpoint(settings.otel_exporter_otlp_endpoint)),
             redactor,
         )
-        provider.add_span_processor(BatchSpanProcessor(otlp))
         exporters.append(otlp)
+        processors.append(BatchSpanProcessor(otlp))
+    provider.add_span_processor(CacheWriteSpanProcessor(processors))
 
     return Telemetry(service_name=service_name, provider=provider, exporters=tuple(exporters))
 
