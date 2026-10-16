@@ -65,6 +65,11 @@ AUTH_REPLY = (
 MODEL_TIMEOUT_REPLY = "The AI model service did not respond in time. Please try again."
 CONTEXT_REPLY = "This conversation has grown too long for the model. Please start a new session."
 MODEL_ERROR_REPLY = "The AI model service returned an error. Please try again."
+# A bug: /chat answers 500, but a stream has already sent 200 and must still end with done.
+UNEXPECTED_ERROR_REPLY = (
+    "Sorry, something went wrong on our side while handling this request. Please reload "
+    "the conversation before you try again."
+)
 
 # Most specific first: the langchain-anthropic classes subclass both hierarchies,
 # and APITimeoutError subclasses APIConnectionError.

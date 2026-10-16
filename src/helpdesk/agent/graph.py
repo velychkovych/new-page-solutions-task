@@ -61,6 +61,7 @@ async def build_graph(
         tool_names=[definition.name for definition in definitions],
         remember_fact_tool=build_remember_fact_tool(ttl_days=settings.fact_ttl_days, clock=clock),
         history_token_budget=settings.history_token_budget,
+        slow_tool_notice_s=settings.slow_tool_notice_s,
         clock=clock,
     )
 

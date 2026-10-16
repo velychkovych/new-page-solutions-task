@@ -1,6 +1,6 @@
 """Reading the checkpointed conversation back out for API responses."""
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import JsonValue
@@ -38,6 +38,41 @@ def message_text(message: BaseMessage) -> str:
     return str(message.text)
 
 
+def call_index(messages: Iterable[BaseMessage]) -> dict[str, ModelCall]:
+    """Every tool call the model made in `messages`, by call id (later replies win)."""
+    return {
+        call.id: call
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in model_calls(message)
+    }
+
+
+def call_view(
+    call_id: str, calls: Mapping[str, ModelCall], fallback_name: str
+) -> tuple[str, dict[str, JsonValue]]:
+    """The name and model-visible args shown for a call, by /chat and the stream alike."""
+    call = calls.get(call_id)
+    if call is None:
+        return fallback_name, {}
+    return call.name, visible_args(call.args)
+
+
+def tool_call_record(message: ToolMessage, calls: Mapping[str, ModelCall]) -> ToolCallRecord | None:
+    """How one answered tool call is reported; None for a declined write (nothing ran)."""
+    if is_declined(message):
+        return None
+    name, args = call_view(message.tool_call_id, calls, message.name or "")
+    text = message_text(message)
+    return ToolCallRecord(
+        name=name,
+        args=args,
+        result_summary=summarize_result(text),
+        error=text if message.status == "error" else None,
+        latency_ms=latency_of(message) or 0,
+    )
+
+
 def tool_call_records(
     messages: Sequence[BaseMessage], new_message_ids: Collection[str]
 ) -> list[ToolCallRecord]:
@@ -46,30 +81,14 @@ def tool_call_records(
     Rejected and unparseable calls are included with their error and 0 ms, since they
     never ran. A declined write is not: nothing ran, and nothing failed.
     """
-    calls: dict[str, ModelCall] = {
-        call.id: call
-        for message in messages
-        if isinstance(message, AIMessage)
-        for call in model_calls(message)
-    }
+    calls = call_index(messages)
     records: list[ToolCallRecord] = []
     for message in messages:
         if not isinstance(message, ToolMessage) or message.id not in new_message_ids:
             continue
-        if is_declined(message):
-            continue
-        call = calls.get(message.tool_call_id)
-        text = message_text(message)
-        is_error = message.status == "error"
-        records.append(
-            ToolCallRecord(
-                name=call.name if call is not None else (message.name or ""),
-                args=visible_args(call.args) if call is not None else {},
-                result_summary=summarize_result(text),
-                error=text if is_error else None,
-                latency_ms=latency_of(message) or 0,
-            )
-        )
+        record = tool_call_record(message, calls)
+        if record is not None:
+            records.append(record)
     return records
 
 

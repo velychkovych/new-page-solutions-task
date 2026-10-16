@@ -20,7 +20,12 @@ from collections.abc import Mapping
 from pydantic import JsonValue
 
 from helpdesk.agent.tool_errors import internal_failure, transport_failure
-from helpdesk.agent.tool_provider import ToolProvider, ToolResult, ToolTransportError
+from helpdesk.agent.tool_provider import (
+    ProgressCallback,
+    ToolProvider,
+    ToolResult,
+    ToolTransportError,
+)
 from helpdesk.shared.errors import parse_tool_error
 
 logger = logging.getLogger(__name__)
@@ -48,11 +53,16 @@ def _contract_problem(result: ToolResult, *, write: bool) -> str | None:
 
 
 async def call_tool(
-    provider: ToolProvider, name: str, args: Mapping[str, JsonValue], *, write: bool
+    provider: ToolProvider,
+    name: str,
+    args: Mapping[str, JsonValue],
+    *,
+    write: bool,
+    on_progress: ProgressCallback | None = None,
 ) -> ToolResult:
     try:
         # `object`: a provider that breaks its protocol is handled, not trusted.
-        result: object = await provider.call(name, args)
+        result: object = await provider.call(name, args, on_progress=on_progress)
     except ToolTransportError:
         return ToolResult(text=transport_failure(name, write=write), is_error=True)
     except Exception as error:

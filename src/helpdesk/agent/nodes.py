@@ -2,6 +2,9 @@
 
 No node has a RetryPolicy and no node retries a tool: the MCP server is the only
 tool retry layer. Transport failures become UPSTREAM_UNAVAILABLE results at once.
+
+The reads and execute_write report each provider call on LangGraph's custom stream
+(`tool_activity`) for /chat/stream. That is not graph state, and approval reports nothing.
 """
 
 import asyncio
@@ -43,6 +46,7 @@ from helpdesk.agent.routing import (
 )
 from helpdesk.agent.run_config import user_id_from_config
 from helpdesk.agent.state import AgentState
+from helpdesk.agent.tool_activity import tool_activity
 from helpdesk.agent.tool_errors import (
     REMEMBER_FACT_NEXT_STEP,
     internal_failure,
@@ -131,6 +135,7 @@ class AgentNodes:
         tool_names: Sequence[str],
         remember_fact_tool: BaseTool,
         history_token_budget: int,
+        slow_tool_notice_s: float,
         clock: Clock,
     ) -> None:
         self._model = model
@@ -140,6 +145,7 @@ class AgentNodes:
         self._tool_names = tuple(tool_names)
         self._remember_fact = remember_fact_tool
         self._history_token_budget = history_token_budget
+        self._slow_tool_notice_s = slow_tool_notice_s
         self._clock = clock
 
     async def load_context(
@@ -193,14 +199,20 @@ class AgentNodes:
         return tool_message(call_id=call.id, name=call.name, text=text, is_error=True)
 
     async def _read(self, call: ModelCall) -> ToolMessage:
-        started = time.perf_counter()
-        result = await call_tool(self._tools, call.name, call.args, write=False)
+        with tool_activity(
+            call.id, call.name, slow_after_s=self._slow_tool_notice_s
+        ) as on_progress:
+            started = time.perf_counter()
+            result = await call_tool(
+                self._tools, call.name, call.args, write=False, on_progress=on_progress
+            )
+            latency = elapsed_ms(started, time.perf_counter())
         return tool_message(
             call_id=call.id,
             name=call.name,
             text=result.text,
             is_error=result.is_error,
-            latency_ms=elapsed_ms(started, time.perf_counter()),
+            latency_ms=latency,
         )
 
     async def _remember(
@@ -283,9 +295,14 @@ class AgentNodes:
             **pending.args,
             **injected_args(pending, user_id_from_config(config)),
         }
-        started = time.perf_counter()
-        result = await call_tool(self._tools, pending.tool.value, args, write=True)
-        latency = elapsed_ms(started, time.perf_counter())
+        with tool_activity(
+            pending.tool_call_id, pending.tool.value, slow_after_s=self._slow_tool_notice_s
+        ) as on_progress:
+            started = time.perf_counter()
+            result = await call_tool(
+                self._tools, pending.tool.value, args, write=True, on_progress=on_progress
+            )
+            latency = elapsed_ms(started, time.perf_counter())
         error = parse_tool_error(result.text) if result.is_error else None
         last_write = WriteResult(
             action_id=pending.action_id,

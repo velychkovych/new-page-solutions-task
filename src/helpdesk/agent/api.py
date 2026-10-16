@@ -1,11 +1,13 @@
-"""FastAPI app factory for the agent (CONTRACTS §3.1; /chat/stream and / come in Phase 2)."""
+"""FastAPI app factory for the agent (CONTRACTS §3.1, §4)."""
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
 from fastapi import Path as PathParam
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from langchain_core.language_models import BaseChatModel
 from opentelemetry.trace import Tracer
 
@@ -18,6 +20,8 @@ from helpdesk.shared.api import ChatRequest, ChatResponse, HealthResponse, Sessi
 from helpdesk.shared.ids import PRINCIPAL_ID_PATTERN
 from helpdesk.shared.settings import Settings
 from helpdesk.telemetry import fastapi_telemetry_config, instrument_app, telemetry_lifespan
+
+logger = logging.getLogger(__name__)
 
 PrincipalPath = Annotated[str, PathParam(pattern=PRINCIPAL_ID_PATTERN)]
 
@@ -65,11 +69,15 @@ def create_app(
                 store=store,
                 clock=clock,
             )
-            runtime.service = ChatService(graph=graph, settings=settings, tracer=tracer)
+            service = ChatService(graph=graph, settings=settings, tracer=tracer)
+            runtime.service = service
             try:
                 yield
             finally:
                 runtime.service = None
+                # A streamed turn whose client left is still running: let it save its
+                # checkpoint before the checkpointer closes.
+                await service.wait_for_streamed_turns()
 
     def chat_service() -> ChatService:
         if runtime.service is None:
@@ -86,6 +94,16 @@ def create_app(
     @app.post("/chat")
     async def chat(body: ChatRequest, service: Annotated[ChatService, service_dep]) -> ChatResponse:
         return await service.chat(body)
+
+    @app.post("/chat/stream", response_class=EventSourceResponse)
+    async def chat_stream(
+        body: ChatRequest, service: Annotated[ChatService, service_dep]
+    ) -> AsyncIterator[ServerSentEvent]:
+        # The body is validated before this runs, so a bad request is a plain 422 JSON
+        # response. FastAPI sets Cache-Control: no-cache and X-Accel-Buffering: no, and
+        # sends ": ping" while the turn is quiet.
+        async for event in service.stream(body):
+            yield ServerSentEvent(event=event.name.value, data=event.data)
 
     @app.get("/sessions/{user_id}/{session_id}")
     async def session(

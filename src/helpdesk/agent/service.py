@@ -1,7 +1,14 @@
-"""One chat turn: decisions, re-asks, graph runs, limits and the request span (CONTRACTS §3)."""
+"""One chat turn: decisions, re-asks, graph runs, limits and the request span (CONTRACTS §3).
+
+/chat and /chat/stream run the same turn (`ChatService._run`). The only difference is how
+the graph is run: /chat with `ainvoke`, the stream with `astream`, whose chunks go to the
+turn's `TurnEvents` (CONTRACTS §4). A streamed turn runs in a background task owned by the
+service, so a client that disconnects does not stop it.
+"""
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -16,6 +23,8 @@ from helpdesk.agent.graph import AgentGraph
 from helpdesk.agent.locks import ThreadLocks
 from helpdesk.agent.routing import Node
 from helpdesk.agent.run_config import build_run_config
+from helpdesk.agent.state import AgentState
+from helpdesk.agent.stream import STREAM_MODES, StreamEvent, TurnEvents
 from helpdesk.agent.transcript import (
     last_ai_message,
     last_ai_text,
@@ -106,6 +115,25 @@ def _last_write_id(snapshot: StateSnapshot) -> str | None:
     return last_write.action_id if last_write is not None else None
 
 
+def _response(
+    outcome: TurnOutcome,
+    history: Sequence[BaseMessage],
+    after: Sequence[BaseMessage],
+    trace_id: str,
+) -> ChatResponse:
+    before = {m.id for m in history}
+    new_ids = {m.id for m in after if m.id is not None and m.id not in before}
+    return ChatResponse(
+        reply=outcome.reply,
+        status=outcome.status,
+        tool_calls=tool_call_records(after, new_ids),
+        pending_action=pending_view(outcome.pending)
+        if outcome.status is ChatStatus.AWAITING_APPROVAL and outcome.pending is not None
+        else None,
+        trace_id=trace_id,
+    )
+
+
 def turn_write(before: StateSnapshot, after: StateSnapshot) -> TurnWrite:
     last_write = _last_write(after)
     if last_write is None or last_write.action_id == _last_write_id(before):
@@ -141,6 +169,10 @@ def interrupted_reply(before: StateSnapshot, after: StateSnapshot) -> str:
     )
 
 
+def _current_trace_id() -> str:
+    return format_trace_id(trace.get_current_span().get_span_context().trace_id)
+
+
 class ChatService:
     def __init__(
         self, *, graph: AgentGraph, settings: Settings, tracer: Tracer | None = None
@@ -149,11 +181,50 @@ class ChatService:
         self._settings = settings
         self._tracer = tracer if tracer is not None else trace.get_tracer(__name__)
         self._locks = ThreadLocks()
+        # Strong references: the event loop keeps only weak ones to tasks.
+        self._streamed_turns: set[asyncio.Task[None]] = set()
 
     def _config(self, user_id: str, session_id: str) -> RunnableConfig:
         return build_run_config(user_id, session_id, recursion_limit=self._settings.recursion_limit)
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
+        return await self._run(request, None)
+
+    def stream(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
+        """Start the turn in the background and return its events (CONTRACTS §4).
+
+        The caller may stop reading at any time: the turn still runs to its end, saves its
+        checkpoint and releases the thread lock.
+        """
+        events = TurnEvents(_current_trace_id())
+        task = asyncio.create_task(self._streamed_turn(request, events))
+        self._streamed_turns.add(task)
+        task.add_done_callback(self._streamed_turn_ended)
+        return aiter(events)
+
+    async def wait_for_streamed_turns(self) -> None:
+        """Let running streamed turns finish (app shutdown), so none loses its checkpoint."""
+        if self._streamed_turns:
+            await asyncio.gather(*self._streamed_turns, return_exceptions=True)
+
+    async def _streamed_turn(self, request: ChatRequest, events: TurnEvents) -> None:
+        try:
+            await self._run(request, events)
+        except Exception as error:
+            # A bug: /chat would answer 500. The request span has recorded the exception.
+            logger.error("streamed turn failed: %s", type(error).__name__)
+        finally:
+            events.close()
+
+    def _streamed_turn_ended(self, task: asyncio.Task[None]) -> None:
+        self._streamed_turns.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            # A BaseException such as SystemExit; reading it here also stops asyncio from
+            # reporting it as never retrieved.
+            logger.error("streamed turn stopped: %s", type(task.exception()).__name__)
+
+    async def _run(self, request: ChatRequest, events: TurnEvents | None) -> ChatResponse:
+        """The one turn behind /chat and /chat/stream; `events` is None for /chat."""
         config = self._config(request.user_id, request.session_id)
         thread = str(config.get("configurable", {})["thread_id"])
         with self._tracer.start_as_current_span(
@@ -165,33 +236,54 @@ class ChatService:
             },
         ) as span:
             trace_id = format_trace_id(span.get_span_context().trace_id)
-            # The lock covers the whole turn, so a second approval waits and then sees
-            # the action already handled. The deadline starts once the lock is held.
+            # The lock covers the whole turn, streaming included, so a second approval
+            # waits and then sees the action already handled. The deadline starts once
+            # the lock is held.
             async with self._locks.hold(thread):
                 start = await self._graph.aget_state(config)
-                before = {m.id for m in _messages(start)}
-                outcome = await self._limited_turn(request, config, span, start)
+                history = _messages(start)
+                if events is not None:
+                    events.begin(trace_id, history)
+                outcome = await self._limited_turn(request, config, span, start, events)
                 after = _messages(await self._graph.aget_state(config))
-            new_ids = {m.id for m in after if m.id is not None and m.id not in before}
-            span.set_attribute(attrs.REQUEST_STATUS, outcome.status.value)
-            if outcome.pending is not None:
-                span.set_attribute(attrs.PENDING_ACTION_ID, outcome.pending.action_id)
-            return ChatResponse(
-                reply=outcome.reply,
-                status=outcome.status,
-                tool_calls=tool_call_records(after, new_ids),
-                pending_action=pending_view(outcome.pending)
-                if outcome.status is ChatStatus.AWAITING_APPROVAL and outcome.pending is not None
-                else None,
-                trace_id=trace_id,
-            )
+                response = _response(outcome, history, after, trace_id)
+                span.set_attribute(attrs.REQUEST_STATUS, outcome.status.value)
+                if outcome.pending is not None:
+                    span.set_attribute(attrs.PENDING_ACTION_ID, outcome.pending.action_id)
+                if events is not None:
+                    # Before the lock is released: the next turn on this thread starts
+                    # only after this stream's `done` is queued.
+                    events.finish(response)
+            return response
+
+    async def _run_graph(
+        self,
+        graph_input: AgentState | Command[str] | None,
+        config: RunnableConfig,
+        events: TurnEvents | None,
+    ) -> None:
+        """The only difference between the two endpoints: how the graph is run.
+
+        Both raise the same errors (ainvoke is built on astream), so the turn's limits and
+        error replies are shared.
+        """
+        if events is None:
+            await self._graph.ainvoke(graph_input, config)
+            return
+        async for mode, chunk in self._graph.astream(graph_input, config, stream_mode=STREAM_MODES):
+            events.graph_chunk(mode, chunk)
 
     async def _limited_turn(
-        self, request: ChatRequest, config: RunnableConfig, span: Span, start: StateSnapshot
+        self,
+        request: ChatRequest,
+        config: RunnableConfig,
+        span: Span,
+        start: StateSnapshot,
+        events: TurnEvents | None,
     ) -> TurnOutcome:
         try:
             async with asyncio.timeout(self._settings.turn_deadline_s):
-                return await self._turn(request, config, start)
+                return await self._turn(request, config, start, events)
         except TimeoutError as error:
             stopped = await self._graph.aget_state(config)
             return self._failed(span, error, deadline_reply(start, stopped))
@@ -214,19 +306,23 @@ class ChatService:
         return TurnOutcome(reply=reply, status=ChatStatus.ERROR)
 
     async def _turn(
-        self, request: ChatRequest, config: RunnableConfig, start: StateSnapshot
+        self,
+        request: ChatRequest,
+        config: RunnableConfig,
+        start: StateSnapshot,
+        events: TurnEvents | None,
     ) -> TurnOutcome:
         snapshot = await self._graph.aget_state(config)
         if Node.EXECUTE_WRITE in snapshot.next:
             # A write was approved but did not finish (crash, restart, deadline). Re-run
             # it before anything else: same key, so the mock replays instead of writing twice.
-            await self._graph.ainvoke(None, config)
+            await self._run_graph(None, config, events)
             snapshot = await self._graph.aget_state(config)
         if proposal_cut_off(snapshot):
             # The last turn stopped (recursion limit, deadline) after propose but before
             # the interrupt, so the user never saw the proposal. Raise the interrupt now;
             # approval has no side effects, so this writes nothing.
-            await self._graph.ainvoke(None, config)
+            await self._run_graph(None, config, events)
             snapshot = await self._graph.aget_state(config)
             shown = awaiting_approval(snapshot)
             if shown is not None and request.decision is None:
@@ -240,7 +336,11 @@ class ChatService:
             if pending is None or request.decision.action_id != pending.action_id:
                 return self._stale(pending)
             return await self._resume(
-                pending, approve=request.decision.approve, config=config, start=start
+                pending,
+                approve=request.decision.approve,
+                config=config,
+                start=start,
+                events=events,
             )
 
         message = request.message or ""
@@ -249,11 +349,13 @@ class ChatService:
             if decision is None:
                 # Deterministic: no model call and no resume while a write is pending.
                 return TurnOutcome(reask_reply(pending), ChatStatus.AWAITING_APPROVAL, pending)
-            return await self._resume(pending, approve=decision, config=config, start=start)
+            return await self._resume(
+                pending, approve=decision, config=config, start=start, events=events
+            )
 
         user_id = str(config.get("configurable", {})["user_id"])
-        await self._graph.ainvoke(
-            {"messages": [HumanMessage(content=message)], "user_id": user_id}, config
+        await self._run_graph(
+            {"messages": [HumanMessage(content=message)], "user_id": user_id}, config, events
         )
         return await self._outcome(config, start)
 
@@ -269,6 +371,7 @@ class ChatService:
         approve: bool,
         config: RunnableConfig,
         start: StateSnapshot,
+        events: TurnEvents | None,
     ) -> TurnOutcome:
         with self._tracer.start_as_current_span(
             attrs.SPAN_APPROVAL,
@@ -278,8 +381,8 @@ class ChatService:
                 attrs.APPROVAL_IDEMPOTENCY_KEY: pending.idempotency_key,
             },
         ):
-            await self._graph.ainvoke(
-                Command(resume=resume_value(pending.action_id, approve=approve)), config
+            await self._run_graph(
+                Command(resume=resume_value(pending.action_id, approve=approve)), config, events
             )
         return await self._outcome(config, start)
 
