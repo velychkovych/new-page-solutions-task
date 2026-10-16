@@ -51,7 +51,7 @@ up: ## Build and start the stack (OBS=1 adds Jaeger on http://localhost:16686)
 down: ## Stop the stack (including Jaeger, agent-e2e and agent-eval)
 	docker compose --profile observability --profile e2e --profile eval down
 
-eval: ## Live evals (agent-eval on :8082, real model), REPEATS=3 -> evals/results/latest.md
+eval: ## Live evals (agent-eval on :8082, real model; judge JUDGE_MODEL_* from the host), REPEATS=3 -> evals/results/latest.md
 	uv run python -m evals.run --repeats $(REPEATS) $(EVAL_MODEL_FLAG)
 
 eval-chaos: ## Chaos-only live eval cases
