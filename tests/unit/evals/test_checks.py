@@ -402,21 +402,34 @@ def test_tool_calls_include_needs_a_successful_call() -> None:
 # --- pagination: was there a next page? ----------------------------------------------------
 
 
-def test_first_search_had_more_pages_reads_the_first_successful_search() -> None:
-    def search(result: str, **kwargs: object) -> object:
-        return tool_span("search_tickets", result=result, **kwargs)
+def test_some_search_had_more_pages_reads_every_successful_search() -> None:
+    def search(result: str, offset_ms: int = 0, **kwargs: object) -> object:
+        return tool_span("search_tickets", result=result, offset_ms=offset_ms, **kwargs)
 
     more = '{"items":[],"next_cursor":"abc"}'
     done = '{"items":[],"next_cursor":null}'
-    first = checks.first_search_had_more_pages
-    assert first(evidence([turn_run(response(), [search(more)])])) is True
-    assert first(evidence([turn_run(response(), [search(done)])])) is False
-    # A later search does not change what the first one returned.
+    some = checks.some_search_had_more_pages
+    assert some(evidence([turn_run(response(), [search(more)])])) is True
+    assert some(evidence([turn_run(response(), [search(done)])])) is False
+    assert some(evidence([turn_run(response(), [search(done), search(done, 1)])])) is False
+    # A narrow first query on one page, then a broader one with a cursor: pagination was
+    # reached, so a skipped cursor is a failure, not "not exercised".
+    assert some(evidence([turn_run(response(), [search(done), search(more, 1)])])) is True
     assert (
-        first(evidence([turn_run(response(), [search(done), search(more, offset_ms=1)])])) is False
+        some(
+            evidence(
+                [
+                    turn_run(response(), [search(done)]),
+                    turn_run(response(), [search(more)], index=2),
+                ]
+            )
+        )
+        is True
     )
-    # A failed first search is skipped; no search, or a result cut short, is unknown.
+    # A failed search is skipped; no search, or a result cut short, is unknown.
     failed = search(more, error_code="UPSTREAM_UNAVAILABLE")
-    assert first(evidence([turn_run(response(), [failed, search(done, offset_ms=1)])])) is False
-    assert first(evidence([turn_run(response(), [tool_span("get_ticket")])])) is None
-    assert first(evidence([turn_run(response(), [search(done[:20])])])) is None
+    assert some(evidence([turn_run(response(), [failed, search(done, 1)])])) is False
+    assert some(evidence([turn_run(response(), [tool_span("get_ticket")])])) is None
+    assert some(evidence([turn_run(response(), [search(done[:20])])])) is None
+    assert some(evidence([turn_run(response(), [search(done), search(done[:20], 1)])])) is None
+    assert some(evidence([turn_run(response(), [search(done[:20]), search(more, 1)])])) is True

@@ -270,6 +270,7 @@ def test_the_metric_result_is_deepevals_metric_data() -> None:
 
 PAGE_1_OF_2 = '{"items":[{"id":"INC-0001"}],"next_cursor":"eyJvIjo1fQ"}'
 EVERYTHING = '{"items":[{"id":"INC-0001"},{"id":"INC-0015"}],"next_cursor":null}'
+NOTHING = '{"items":[],"next_cursor":null}'
 
 
 def _pagination(*spans: Any, reply: str = "INC-0015 is open.") -> CaseEvidence:
@@ -309,6 +310,18 @@ async def test_every_match_on_the_first_page_is_not_exercised() -> None:
     assert by_name["cursor_followed"].score is None
     # Every other check still applies: the answer must still name the page-2 ticket.
     assert by_name["turn 1 reply_matches"].outcome is Outcome.PASSED
+
+
+async def test_a_cursor_skipped_on_a_later_search_fails_instead_of_not_exercised() -> None:
+    # The narrow first query fits one page; the broader second one returns a cursor that
+    # the agent never follows. Pagination was reached, so cursor_followed fails.
+    narrow = tool_span("search_tickets", args='{"query":"network ticket"}', result=NOTHING)
+    broad = tool_span("search_tickets", args='{"query":"network"}', result=PAGE_1_OF_2, offset_ms=1)
+    result = await score(collected(_pagination(narrow, broad, reply="INC-0014 is open.")))
+    assert result.outcome is Outcome.FAILED
+    by_name = {m.name: m for m in result.metrics}
+    assert by_name["cursor_followed"].outcome is Outcome.FAILED
+    assert "cursor_followed: no successful search_tickets call carried a cursor" in result.reasons
 
 
 async def test_a_not_exercised_run_still_fails_its_other_checks() -> None:

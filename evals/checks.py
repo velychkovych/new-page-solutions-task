@@ -82,25 +82,33 @@ def no_tool_calls(expect: CaseExpect, evidence: CaseEvidence) -> list[str]:
     return []
 
 
-def first_search_had_more_pages(evidence: CaseEvidence) -> bool | None:
-    """Whether the first successful search_tickets result had a next page.
+def some_search_had_more_pages(evidence: CaseEvidence) -> bool | None:
+    """Whether any successful search_tickets result had a next page.
 
-    None when that is not known: no successful search, or a result cut short in the span
-    (the MCP server truncates long results), so a run is only reported "not exercised"
-    when the trace proves every match was on the first page.
+    Every search counts, not only the first: a narrow first query can hold one page while a
+    broader later one returns a cursor, and skipping that cursor is the failure. None when
+    no result had a cursor but that is not proven: no successful search, or a result cut
+    short in the span (the MCP server truncates long results). So a run is only reported
+    "not exercised" when the trace proves no search ever returned a cursor.
     """
+    proven = True
+    searched = False
     for run in evidence.turns:
         for span in run.trace.tool_spans:
             if tool_name(span) != ToolName.SEARCH_TICKETS or tool_error_code(span) is not None:
                 continue
+            searched = True
             try:
                 result = json.loads(tool_result(span))
             except json.JSONDecodeError:
-                return None
+                proven = False
+                continue
             if not isinstance(result, dict) or "next_cursor" not in result:
-                return None
-            return result["next_cursor"] is not None
-    return None
+                proven = False
+                continue
+            if result["next_cursor"] is not None:
+                return True
+    return False if searched and proven else None
 
 
 def cursor_followed(expect: CaseExpect, evidence: CaseEvidence) -> list[str]:

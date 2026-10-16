@@ -19,20 +19,20 @@ from deepeval.models import DeepEvalBaseLLM
 from deepeval.test_case import ConversationalTestCase, MultiTurnParams
 
 from evals.cases import Case, JudgeSpec
-from evals.checks import CASE_CHECKS, TURN_CHECKS, first_search_had_more_pages
+from evals.checks import CASE_CHECKS, TURN_CHECKS, some_search_had_more_pages
 from evals.evidence import CaseEvidence, evidence_from_metadata
 from evals.judges import JudgeFor
 
 DETERMINISTIC_MODEL = "deterministic"
 CURSOR_NOT_EXERCISED = (
-    "not exercised: the first search_tickets result had next_cursor null (every match on"
-    " one page), so there was no cursor to follow"
+    "not exercised: every search_tickets result had next_cursor null (every match on one"
+    " page), so there was no cursor to follow"
 )
 
 # Keys whose situation a run may never reach, and how the evidence shows that it did not.
 NOT_EXERCISED: dict[str, tuple[Callable[[CaseEvidence], bool], str]] = {
     "cursor_followed": (
-        lambda evidence: first_search_had_more_pages(evidence) is False,
+        lambda evidence: some_search_had_more_pages(evidence) is False,
         CURSOR_NOT_EXERCISED,
     ),
 }

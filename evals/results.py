@@ -16,9 +16,9 @@ class _Model(BaseModel):
 class Outcome(StrEnum):
     PASSED = "pass"
     FAILED = "fail"
-    # The run never reached the situation a check is about (PLAN case 4: the first search
-    # already returned every match, so there was no cursor to follow). It neither passes
-    # nor fails, and the pass rate leaves it out.
+    # The run never reached the situation a check is about (PLAN case 4: no search
+    # returned a next page, so there was no cursor to follow). It neither passes nor
+    # fails, and the pass rate leaves it out.
     NOT_EXERCISED = "not_exercised"
 
 
