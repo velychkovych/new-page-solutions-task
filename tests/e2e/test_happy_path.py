@@ -49,7 +49,8 @@ def test_one_request_is_one_trace_across_agent_mcp_and_mock(agent: Agent, mock: 
     assert trace_id != "0" * 32
 
     agent_spans = wait_for_spans("agent", trace_id, attrs.SPAN_REQUEST)
-    mcp_spans = wait_for_spans("mcp", trace_id, attrs.SPAN_TOOL)
+    # Both tool calls' spans, so the snapshot holds every MCP span the mock spans need.
+    mcp_spans = wait_for_spans("mcp", trace_id, attrs.SPAN_TOOL, count=2)
     mock_spans = wait_for_spans("mock", trace_id, "GET /tickets/{ticket_id}")
 
     tools = {s["attributes"][attrs.TOOL_NAME] for s in mcp_spans if s["name"] == attrs.SPAN_TOOL}

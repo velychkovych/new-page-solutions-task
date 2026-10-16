@@ -295,6 +295,9 @@ def spans_in_trace(service: str, trace_id: str) -> list[dict[str, Any]]:
     spans = []
     with path.open(encoding="utf-8", errors="replace") as file:
         for line in file:
+            if not line.endswith("\n"):
+                # The exporter is still appending this line; the next poll reads it whole.
+                break
             if trace_id in line:
                 span = json.loads(line)
                 if span["trace_id"] == trace_id:
@@ -303,15 +306,24 @@ def spans_in_trace(service: str, trace_id: str) -> list[dict[str, Any]]:
 
 
 def wait_for_spans(
-    service: str, trace_id: str, name: str, timeout_s: float = TRACE_FLUSH_TIMEOUT_S
+    service: str,
+    trace_id: str,
+    name: str,
+    timeout_s: float = TRACE_FLUSH_TIMEOUT_S,
+    *,
+    count: int = 1,
 ) -> list[dict[str, Any]]:
-    """The trace's spans of this service once one named `name` is there (batched export)."""
+    """The trace's spans of this service once `count` spans named `name` are there.
+
+    Spans are exported in timed batches, so spans that end close together can land in
+    different batches: wait for the last one a test needs, not the first.
+    """
     deadline = time.monotonic() + timeout_s
     while True:
         spans = spans_in_trace(service, trace_id)
-        if any(span["name"] == name for span in spans):
+        if sum(span["name"] == name for span in spans) >= count:
             return spans
-        assert time.monotonic() < deadline, f"no {name!r} span of {trace_id} in {service}"
+        assert time.monotonic() < deadline, f"no {count} {name!r} spans of {trace_id} in {service}"
         time.sleep(0.25)
 
 
