@@ -256,6 +256,16 @@ SCENARIOS = {
         ],
         {"message": "Create a VPN ticket"},
     ),
+    "reused-id": Scenario(
+        # Each result belongs to the call that was current when it ran, not to the last
+        # call with that id.
+        lambda ai: [
+            ai("", ("search_tickets", {"query": "a"}, "r1")),
+            ai("", ("search_tickets", {"query": "b"}, "r1")),
+            ai("Done."),
+        ],
+        {"message": "Is there a VPN ticket?"},
+    ),
     "blank-answer": Scenario(lambda ai: [ai("   ")], {"message": "hello"}),
     "model-error": Scenario(lambda ai: [], {"message": "hello"}, model={"raises": OVERLOADED}),
     "deadline": Scenario(
@@ -322,6 +332,18 @@ async def test_stream_matches_chat_for_the_same_scripted_turn(
         ignore = {"action_id"}
         assert approval.model_dump(exclude=ignore) == chat.pending_action.model_dump(exclude=ignore)
     assert len(stream_provider.writes()) == len(chat_provider.writes())
+
+
+async def test_chat_lists_each_call_with_its_own_args_when_an_id_is_reused(
+    make_client, provider, fake_model, make_ai
+):
+    model = fake_model(responses=SCENARIOS["reused-id"].script(make_ai))
+    client = await make_client(model, provider)
+    chat = await _chat(client, message="Is there a VPN ticket?")
+    assert [(r.name, r.args) for r in chat.tool_calls] == [
+        ("search_tickets", {"query": "a"}),
+        ("search_tickets", {"query": "b"}),
+    ]
 
 
 # --- single turns ----------------------------------------------------------------------

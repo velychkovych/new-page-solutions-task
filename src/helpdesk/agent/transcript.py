@@ -80,10 +80,16 @@ def tool_call_records(
 
     Rejected and unparseable calls are included with their error and 0 ms, since they
     never ran. A declined write is not: nothing ran, and nothing failed.
+
+    Calls are indexed reply by reply, as the stream does: a result belongs to the call
+    that was current when it ran, even if a later reply reuses the call id.
     """
-    calls = call_index(messages)
+    calls: dict[str, ModelCall] = {}
     records: list[ToolCallRecord] = []
     for message in messages:
+        if isinstance(message, AIMessage):
+            calls.update((call.id, call) for call in model_calls(message))
+            continue
         if not isinstance(message, ToolMessage) or message.id not in new_message_ids:
             continue
         record = tool_call_record(message, calls)
