@@ -57,6 +57,8 @@ services:
       MCP_PORT: "8001"
       MOCK_URL: http://mock:8000
       MOCK_API_TOKEN: ${MOCK_API_TOKEN:?run `make setup` to create .env}
+    volumes:
+      - ./traces:/app/traces
     networks: [agent_net, mock_net]
     ports: ["127.0.0.1:8001:8001"]
     depends_on:
@@ -99,6 +101,39 @@ services:
       <<: *healthcheck
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
 
+  # The e2e twin of `agent` (profile `e2e`, started by `make test-e2e`): the same image
+  # with the scripted fake model, so the e2e tests need no model key and are
+  # deterministic. Its own port, data volume and TRACES_DIR, so its checkpoints and spans
+  # never mix with the browser agent's.
+  agent-e2e:
+    profiles: [e2e]
+    image: helpdesk:local
+    command: ["python", "-m", "helpdesk.agent"]
+    environment:
+      <<: *telemetry-env
+      # A subdirectory: two agent processes must not append to the same JSONL file.
+      TRACES_DIR: /app/traces/e2e
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: "8080"
+      MCP_URL: http://mcp:8001/mcp
+      MODEL_PROVIDER: fake
+      FAKE_MODEL_SCRIPT: /app/e2e/fake_model_script.json
+      CHECKPOINT_DB_PATH: /app/data/checkpoints.sqlite
+      STORE_DB_PATH: /app/data/store.sqlite
+      JAEGER_UI_URL: ${JAEGER_UI_URL:-}
+      WEB_DIR: /app/web
+    volumes:
+      - agent_e2e_data:/app/data
+      - ./traces:/app/traces
+      - ./tests/e2e/fixtures:/app/e2e:ro
+    networks: [agent_net]
+    ports: ["127.0.0.1:8081:8080"]
+    depends_on:
+      mcp: {condition: service_healthy}
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+
   jaeger:
     profiles: [observability]
     image: jaegertracing/jaeger:2.22.0
@@ -118,3 +153,4 @@ networks:
 volumes:
   mock_data: {}
   agent_data: {}
+  agent_e2e_data: {}

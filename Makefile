@@ -38,14 +38,15 @@ typecheck: ## mypy --strict on src/
 test: ## Unit + integration tests (no docker stack needed)
 	uv run pytest tests/unit tests/integration
 
-test-e2e: ## End-to-end tests; requires `make up`
+test-e2e: ## End-to-end tests; requires `make up`. Starts agent-e2e (fake model) on :8081
+	$(COMPOSE_UP_ENV) docker compose $(COMPOSE_PROFILES_FLAG) --profile e2e up -d --wait agent-e2e
 	uv run pytest -m e2e tests/e2e
 
 up: ## Build and start the stack (OBS=1 adds Jaeger on http://localhost:16686)
 	$(COMPOSE_UP_ENV) docker compose $(COMPOSE_PROFILES_FLAG) up -d --build --wait
 
-down: ## Stop the stack (including Jaeger)
-	docker compose --profile observability down
+down: ## Stop the stack (including Jaeger and agent-e2e)
+	docker compose --profile observability --profile e2e down
 
 eval: ## Live evals with a real model, REPEATS=3 by default -> evals/results/latest.md
 	uv run python -m evals.run --repeats $(REPEATS)

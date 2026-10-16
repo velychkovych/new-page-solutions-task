@@ -1,0 +1,29 @@
+[
+  {
+    "content": "Let me check for an existing printer ticket.",
+    "tool_calls": [
+      {"name": "search_tickets", "args": {"query": "printer"}, "id": "call_search"}
+    ]
+  },
+  {
+    "tool_calls": [
+      {"name": "get_ticket", "args": {"ticket_id": "INC-0011"}, "id": "call_get"}
+    ]
+  },
+  {
+    "content": "INC-0011 was resolved, so this needs a new ticket.",
+    "tool_calls": [
+      {
+        "name": "create_ticket",
+        "args": {
+          "title": "Printer on floor 3 jams again",
+          "description": "The floor 3 printer jams on every double-sided job, like INC-0011 did on floor 2.",
+          "category": "hardware",
+          "priority": "medium"
+        },
+        "id": "call_create"
+      }
+    ]
+  },
+  {"content": ""}
+]
