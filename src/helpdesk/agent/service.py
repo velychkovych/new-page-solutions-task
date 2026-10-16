@@ -7,9 +7,11 @@ service, so a client that disconnects does not stop it.
 """
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -270,8 +272,17 @@ class ChatService:
         if events is None:
             await self._graph.ainvoke(graph_input, config)
             return
-        async for mode, chunk in self._graph.astream(graph_input, config, stream_mode=STREAM_MODES):
-            events.graph_chunk(mode, chunk)
+        # Closed on the way out: if mapping a chunk raises, the graph's node tasks (an
+        # approved write among them) are cancelled and awaited here, before the thread
+        # lock goes to the next turn. Left open, they would run on beside it.
+        # `astream` is an async generator, though it is annotated as an AsyncIterator.
+        stream = cast(
+            AsyncGenerator[tuple[str, object]],
+            self._graph.astream(graph_input, config, stream_mode=STREAM_MODES),
+        )
+        async with contextlib.aclosing(stream) as chunks:
+            async for mode, chunk in chunks:
+                events.graph_chunk(mode, chunk)
 
     async def _limited_turn(
         self,

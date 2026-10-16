@@ -30,8 +30,8 @@ from pydantic import BaseModel
 from helpdesk.agent import turn_errors
 from helpdesk.agent.api import create_app
 from helpdesk.agent.service import STALE_DECISION_REPLY, reask_reply
-from helpdesk.agent.stream import REPLY_SEPARATOR
-from helpdesk.agent.tool_activity import progress_message, slow_tool_message
+from helpdesk.agent.stream import REPLY_SEPARATOR, TurnEvents
+from helpdesk.agent.tool_activity import ToolStarted, progress_message, slow_tool_message
 from helpdesk.agent.tool_provider import ToolResult
 from helpdesk.shared import trace_attributes as attrs
 from helpdesk.shared.api import (
@@ -787,6 +787,58 @@ async def test_concurrent_stream_and_chat_on_one_thread_write_once(
     assert len(provider.writes()) == 1
     replies = sorted([tokens(streamed), chatted.reply])
     assert replies == sorted(["Created.", STALE_DECISION_REPLY])
+
+
+async def test_a_failing_event_mapper_stops_the_write_before_the_next_turn(
+    make_client, provider, fake_model, make_ai, monkeypatch
+):
+    """A bug in event mapping ends the stream; the graph's tasks must be stopped (and
+    their cleanup awaited) before the thread lock goes to the next turn."""
+    active = 0
+    peak = 0
+
+    async def slow_write(_args):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.3)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # a call that takes a while to unwind
+            raise
+        finally:
+            active -= 1
+        return ToolResult(text=json.dumps({"id": "INC-0016"}), is_error=False)
+
+    provider.replies["create_ticket"] = [slow_write, slow_write]
+    model = fake_model(responses=_proposal_script(make_ai, make_ai("Created.")), repeat_last=True)
+    client = await make_client(model, provider)
+    await _chat(client, message=PROPOSAL_MESSAGE)
+
+    original = TurnEvents._on_signal
+    failed = False
+
+    def broken_on_signal(self, signal):
+        nonlocal failed
+        if isinstance(signal, ToolStarted) and signal.call_id == "w1" and not failed:
+            failed = True
+            raise RuntimeError("mapping bug")
+        original(self, signal)
+
+    monkeypatch.setattr(TurnEvents, "_on_signal", broken_on_signal)
+
+    async def next_turn() -> ChatResponse:
+        await asyncio.sleep(0.05)  # queued behind the stream on the thread lock
+        return await _chat(client, message="hello")
+
+    streamed, chatted = await asyncio.gather(_stream_response(client, message="yes"), next_turn())
+
+    events = parse_sse(streamed.text)
+    assert [e.name for e in events][-2:] == [SseEvent.ERROR, SseEvent.DONE]
+    assert failed
+    assert chatted.status is ChatStatus.OK
+    assert peak == 1
+    assert len({w.idempotency_key for w in provider.writes()}) == 1
 
 
 def _asgi_scope(path: str) -> dict[str, Any]:
