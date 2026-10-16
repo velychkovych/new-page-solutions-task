@@ -65,3 +65,44 @@ def test_model_messages_put_the_system_prompt_first():
     system = SystemMessage("rules", id="sys")
     messages = [HumanMessage("one"), system, AIMessage("two")]
     assert model_messages(messages, token_budget=1_000) == [system, messages[0], messages[2]]
+
+
+def test_orphan_invalid_tool_calls_get_a_result_too():
+    # langchain-anthropic sends an invalid call (with id and name) as a tool_use block.
+    orphan = AIMessage(
+        "",
+        invalid_tool_calls=[
+            {
+                "type": "invalid_tool_call",
+                "name": "search_tickets",
+                "args": '{"q',
+                "id": "cut",
+                "error": "not valid JSON",
+            }
+        ],
+    )
+    patched = answer_orphan_tool_calls([HumanMessage("hi"), orphan, HumanMessage("again")])
+    assert isinstance(patched[2], ToolMessage)
+    assert patched[2].tool_call_id == "cut"
+    assert patched[2].status == "error"
+
+
+def test_blank_replies_are_left_out_of_the_model_input():
+    blank = AIMessage("  \n")
+    blank_blocks = AIMessage(["  ", {"type": "text", "text": " "}])
+    blank_with_call = AIMessage(" ", tool_calls=[{"name": "get_ticket", "args": {}, "id": "c1"}])
+    result = ToolMessage("{}", tool_call_id="c1")
+    messages = [HumanMessage("a"), blank, blank_blocks, HumanMessage("b"), blank_with_call, result]
+
+    shaped = model_messages(messages, token_budget=1_000)
+
+    assert [type(m).__name__ for m in shaped] == [
+        "HumanMessage",
+        "HumanMessage",
+        "AIMessage",
+        "ToolMessage",
+    ]
+    assert shaped[2].content == ""
+    assert shaped[2].tool_calls == blank_with_call.tool_calls
+    # The stored messages are untouched.
+    assert blank_with_call.content == " "

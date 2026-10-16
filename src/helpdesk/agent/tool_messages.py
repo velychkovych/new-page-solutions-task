@@ -2,16 +2,13 @@
 
 from langchain_core.messages import ToolMessage
 
-from helpdesk.shared.errors import ErrorCode, format_tool_error
-
-# Present only on messages for calls that actually ran (tools node, execute_write);
-# the API lists exactly those as `tool_calls`.
+# Present only on messages for calls that actually ran (tools node, execute_write); a
+# call that was rejected before it ran is listed in the API's `tool_calls` with 0 ms.
 LATENCY_KEY = "helpdesk_latency_ms"
+# Marks record_decline's message: the API does not list a declined write (nothing ran).
+DECLINED_KEY = "helpdesk_declined"
 
-TRANSPORT_FAILURE = format_tool_error(
-    ErrorCode.UPSTREAM_UNAVAILABLE, "The ticketing tools could not be reached"
-)
-
+# CONTRACTS §5.3 fixes this text; it is the one error ToolMessage not in ERROR format.
 USER_DECLINED = "User declined. Do not retry this write unless the user asks."
 
 
@@ -27,9 +24,24 @@ def tool_message(
     )
 
 
+def declined_message(*, call_id: str, name: str) -> ToolMessage:
+    # status="error": the write did not run (CONTRACTS §5.3).
+    return ToolMessage(
+        content=USER_DECLINED,
+        tool_call_id=call_id,
+        name=name,
+        status="error",
+        response_metadata={DECLINED_KEY: True},
+    )
+
+
 def latency_of(message: ToolMessage) -> int | None:
     value = message.response_metadata.get(LATENCY_KEY)
     return value if isinstance(value, int) else None
+
+
+def is_declined(message: ToolMessage) -> bool:
+    return message.response_metadata.get(DECLINED_KEY) is True
 
 
 def elapsed_ms(started: float, finished: float) -> int:

@@ -5,8 +5,8 @@ import uuid
 from langchain_core.messages import ToolCall
 from pydantic import BaseModel, ValidationError
 
+from helpdesk.agent.tool_errors import invalid_args_error, missing_id_error
 from helpdesk.shared.approval import PendingAction
-from helpdesk.shared.errors import ErrorCode, format_tool_error
 from helpdesk.shared.tools import AddCommentArgs, CreateTicketArgs, ToolName
 
 _ARGS_MODELS: dict[ToolName, type[BaseModel]] = {
@@ -42,14 +42,6 @@ def summarize(tool: ToolName, args: BaseModel) -> str:
     raise ValueError(f"no summary for {tool}")  # pragma: no cover - _ARGS_MODELS is exhaustive
 
 
-def _validation_summary(error: ValidationError) -> str:
-    parts = [
-        f"{'.'.join(str(p) for p in item['loc']) or 'arguments'}: {item['msg']}"
-        for item in error.errors(include_url=False, include_input=False)
-    ]
-    return "; ".join(parts)
-
-
 def build_pending_action(call: ToolCall) -> PendingAction:
     """Validate a write call and create its pending action.
 
@@ -57,19 +49,14 @@ def build_pending_action(call: ToolCall) -> PendingAction:
     interrupt, in its own node, so resuming never mints a second key.
     """
     tool = ToolName(call["name"])
+    model = _ARGS_MODELS[tool]
     try:
-        args = _ARGS_MODELS[tool].model_validate(call["args"])
+        args = model.model_validate(call["args"])
     except ValidationError as error:
-        raise InvalidProposalError(
-            format_tool_error(
-                ErrorCode.INVALID_ARGUMENT,
-                f"Invalid {tool.value} arguments ({_validation_summary(error)})",
-            )
-        ) from error
-    if call["id"] is None:
-        raise InvalidProposalError(
-            format_tool_error(ErrorCode.INVALID_ARGUMENT, "The tool call has no id")
-        )
+        raise InvalidProposalError(invalid_args_error(tool.value, error, model)) from error
+    if not call["id"]:
+        # The agent node gives every call an id, so this only guards the type.
+        raise InvalidProposalError(missing_id_error(tool.value))
     return PendingAction(
         action_id=str(uuid.uuid4()),
         idempotency_key=str(uuid.uuid4()),

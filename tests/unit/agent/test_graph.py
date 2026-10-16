@@ -14,9 +14,9 @@ from helpdesk.agent.decision import resume_value
 from helpdesk.agent.graph import InjectedArgumentVisibleError
 from helpdesk.agent.prompt import SYSTEM_PROMPT_ID
 from helpdesk.agent.prompt_caching import CACHE_CONTROL
-from helpdesk.agent.routing import ONE_CHANGE_AT_A_TIME
 from helpdesk.agent.run_config import build_run_config
-from helpdesk.agent.tool_messages import TRANSPORT_FAILURE, USER_DECLINED
+from helpdesk.agent.tool_errors import rejected_batch_error, transport_failure
+from helpdesk.agent.tool_messages import USER_DECLINED
 from helpdesk.agent.tool_provider import ToolDefinition, ToolResult
 from helpdesk.shared.approval import PendingAction, WriteResult
 from helpdesk.shared.errors import ErrorCode, parse_tool_error
@@ -108,6 +108,8 @@ async def test_decline_writes_nothing(make_graph, provider, fake_model, make_ai)
     decline = _tool_messages(result)[-1]
     assert decline.tool_call_id == "w1"
     assert decline.content == USER_DECLINED
+    # The write did not run, so its result is an error (CONTRACTS §5.3).
+    assert decline.status == "error"
     assert len(model.calls) == 3
 
 
@@ -210,11 +212,15 @@ async def test_parallel_or_mixed_writes_are_rejected_call_by_call(
 
     tool_messages = _tool_messages(result)
     assert [m.tool_call_id for m in tool_messages] == [call[2] for call in calls]
-    assert all(m.content == ONE_CHANGE_AT_A_TIME for m in tool_messages)
+    expected = rejected_batch_error([call[0] for call in calls])
+    assert all(m.content == expected for m in tool_messages)
     assert all(m.status == "error" for m in tool_messages)
-    assert ONE_CHANGE_AT_A_TIME.startswith(
+    assert expected.startswith(
         "ERROR INVALID_ARGUMENT: propose one change at a time, after your reads. Next step: "
     )
+    # Specific (CONTRACTS §2.4): it says what was combined.
+    assert all(call[0] in expected for call in calls)
+    assert parse_tool_error(expected) is not None
     assert provider.calls == []
     assert result.get("pending_action") is None
     assert len(model.calls) == 2
@@ -290,8 +296,10 @@ async def test_read_transport_failure_is_upstream_unavailable_without_retry(
     result = await graph.ainvoke(_start(), CONFIG)
 
     (message,) = _tool_messages(result)
-    assert message.content == TRANSPORT_FAILURE
-    assert parse_tool_error(TRANSPORT_FAILURE).code is ErrorCode.UPSTREAM_UNAVAILABLE
+    assert message.content == transport_failure("search_tickets", write=False)
+    assert message.status == "error"
+    assert parse_tool_error(message.content).code is ErrorCode.UPSTREAM_UNAVAILABLE
+    assert "search_tickets" in message.content
     assert len(provider.calls) == 1
 
 
@@ -312,7 +320,10 @@ async def test_write_transport_failure_is_upstream_unavailable_without_retry(
     last_write = result["last_write"]
     assert not last_write.ok
     assert last_write.error_code is ErrorCode.UPSTREAM_UNAVAILABLE
-    assert _tool_messages(result)[-1].content == TRANSPORT_FAILURE
+    text = _tool_messages(result)[-1].content
+    assert text == transport_failure("create_ticket", write=True)
+    assert "could not be confirmed" in text
+    assert "do not make up a ticket id" in text
     assert result["pending_action"] is None
 
 

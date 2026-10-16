@@ -11,11 +11,13 @@ from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode, Tracer, format_trace_id
 
 from helpdesk.agent.decision import resume_value
+from helpdesk.agent.final_reply import TurnWrite, final_reply
 from helpdesk.agent.graph import AgentGraph
 from helpdesk.agent.locks import ThreadLocks
 from helpdesk.agent.routing import Node
 from helpdesk.agent.run_config import build_run_config
 from helpdesk.agent.transcript import (
+    last_ai_message,
     last_ai_text,
     pending_view,
     session_messages,
@@ -25,6 +27,10 @@ from helpdesk.agent.turn_errors import (
     DEADLINE_AFTER_WRITE_REPLY,
     DEADLINE_REPLY,
     DEADLINE_WRITE_UNFINISHED_REPLY,
+    INTERRUPTED_AFTER_WRITE_REPLY,
+    INTERRUPTED_REPLY,
+    INTERRUPTED_WRITE_UNFINISHED_REPLY,
+    is_interruption,
     turn_error_reply,
 )
 from helpdesk.shared import trace_attributes as attrs
@@ -35,7 +41,6 @@ from helpdesk.shared.settings import Settings
 logger = logging.getLogger(__name__)
 
 STALE_DECISION_REPLY = "That action was already handled or was not found."
-EMPTY_REPLY = "Done."
 
 
 def reask_reply(pending: PendingAction) -> str:
@@ -91,18 +96,49 @@ def proposal_cut_off(snapshot: StateSnapshot) -> bool:
     return Node.APPROVAL in snapshot.next and not snapshot.interrupts
 
 
-def _last_write_id(snapshot: StateSnapshot) -> str | None:
+def _last_write(snapshot: StateSnapshot) -> WriteResult | None:
     last_write = _values(snapshot).get("last_write")
-    return last_write.action_id if isinstance(last_write, WriteResult) else None
+    return last_write if isinstance(last_write, WriteResult) else None
+
+
+def _last_write_id(snapshot: StateSnapshot) -> str | None:
+    last_write = _last_write(snapshot)
+    return last_write.action_id if last_write is not None else None
+
+
+def turn_write(before: StateSnapshot, after: StateSnapshot) -> TurnWrite:
+    last_write = _last_write(after)
+    if last_write is None or last_write.action_id == _last_write_id(before):
+        return TurnWrite.NONE
+    return TurnWrite.SAVED if last_write.ok else TurnWrite.FAILED
+
+
+def _stopped_reply(
+    before: StateSnapshot, after: StateSnapshot, replies: tuple[str, str, str]
+) -> str:
+    """Never tell the user nothing changed when a write may have happened."""
+    nothing_changed, write_unfinished, after_write = replies
+    if Node.EXECUTE_WRITE in after.next:
+        return write_unfinished
+    if _last_write_id(after) != _last_write_id(before):
+        return after_write
+    return nothing_changed
 
 
 def deadline_reply(before: StateSnapshot, after: StateSnapshot) -> str:
-    """Never tell the user nothing changed when a write may have happened."""
-    if Node.EXECUTE_WRITE in after.next:
-        return DEADLINE_WRITE_UNFINISHED_REPLY
-    if _last_write_id(after) != _last_write_id(before):
-        return DEADLINE_AFTER_WRITE_REPLY
-    return DEADLINE_REPLY
+    return _stopped_reply(
+        before,
+        after,
+        (DEADLINE_REPLY, DEADLINE_WRITE_UNFINISHED_REPLY, DEADLINE_AFTER_WRITE_REPLY),
+    )
+
+
+def interrupted_reply(before: StateSnapshot, after: StateSnapshot) -> str:
+    return _stopped_reply(
+        before,
+        after,
+        (INTERRUPTED_REPLY, INTERRUPTED_WRITE_UNFINISHED_REPLY, INTERRUPTED_AFTER_WRITE_REPLY),
+    )
 
 
 class ChatService:
@@ -155,11 +191,16 @@ class ChatService:
     ) -> TurnOutcome:
         try:
             async with asyncio.timeout(self._settings.turn_deadline_s):
-                return await self._turn(request, config)
+                return await self._turn(request, config, start)
         except TimeoutError as error:
             stopped = await self._graph.aget_state(config)
             return self._failed(span, error, deadline_reply(start, stopped))
         except Exception as error:
+            if is_interruption(error):
+                # Like the deadline: the interrupted node did not finish, and a write
+                # left unfinished is re-run with the same key on the next request.
+                stopped = await self._graph.aget_state(config)
+                return self._failed(span, error, interrupted_reply(start, stopped))
             known = turn_error_reply(error)
             if known is None:
                 raise
@@ -172,7 +213,9 @@ class ChatService:
         span.set_status(Status(StatusCode.ERROR, type(error).__name__))
         return TurnOutcome(reply=reply, status=ChatStatus.ERROR)
 
-    async def _turn(self, request: ChatRequest, config: RunnableConfig) -> TurnOutcome:
+    async def _turn(
+        self, request: ChatRequest, config: RunnableConfig, start: StateSnapshot
+    ) -> TurnOutcome:
         snapshot = await self._graph.aget_state(config)
         if Node.EXECUTE_WRITE in snapshot.next:
             # A write was approved but did not finish (crash, restart, deadline). Re-run
@@ -196,7 +239,9 @@ class ChatService:
         if request.decision is not None:
             if pending is None or request.decision.action_id != pending.action_id:
                 return self._stale(pending)
-            return await self._resume(pending, approve=request.decision.approve, config=config)
+            return await self._resume(
+                pending, approve=request.decision.approve, config=config, start=start
+            )
 
         message = request.message or ""
         if pending is not None:
@@ -204,13 +249,13 @@ class ChatService:
             if decision is None:
                 # Deterministic: no model call and no resume while a write is pending.
                 return TurnOutcome(reask_reply(pending), ChatStatus.AWAITING_APPROVAL, pending)
-            return await self._resume(pending, approve=decision, config=config)
+            return await self._resume(pending, approve=decision, config=config, start=start)
 
         user_id = str(config.get("configurable", {})["user_id"])
         await self._graph.ainvoke(
             {"messages": [HumanMessage(content=message)], "user_id": user_id}, config
         )
-        return await self._outcome(config)
+        return await self._outcome(config, start)
 
     @staticmethod
     def _stale(pending: PendingAction | None) -> TurnOutcome:
@@ -218,7 +263,12 @@ class ChatService:
         return TurnOutcome(STALE_DECISION_REPLY, status, pending)
 
     async def _resume(
-        self, pending: PendingAction, *, approve: bool, config: RunnableConfig
+        self,
+        pending: PendingAction,
+        *,
+        approve: bool,
+        config: RunnableConfig,
+        start: StateSnapshot,
     ) -> TurnOutcome:
         with self._tracer.start_as_current_span(
             attrs.SPAN_APPROVAL,
@@ -231,15 +281,17 @@ class ChatService:
             await self._graph.ainvoke(
                 Command(resume=resume_value(pending.action_id, approve=approve)), config
             )
-        return await self._outcome(config)
+        return await self._outcome(config, start)
 
-    async def _outcome(self, config: RunnableConfig) -> TurnOutcome:
+    async def _outcome(self, config: RunnableConfig, start: StateSnapshot) -> TurnOutcome:
         snapshot = await self._graph.aget_state(config)
-        text = last_ai_text(_messages(snapshot))
+        messages = _messages(snapshot)
         pending = awaiting_approval(snapshot)
         if pending is not None:
+            text = last_ai_text(messages)
             return TurnOutcome(proposal_reply(text, pending), ChatStatus.AWAITING_APPROVAL, pending)
-        return TurnOutcome(text or EMPTY_REPLY, ChatStatus.OK)
+        reply = final_reply(last_ai_message(messages), turn_write(start, snapshot))
+        return TurnOutcome(reply, ChatStatus.OK)
 
     async def session(self, user_id: str, session_id: str) -> SessionView:
         snapshot = await self._graph.aget_state(self._config(user_id, session_id))

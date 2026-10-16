@@ -15,7 +15,7 @@ from langchain_core.exceptions import (
     ModelRateLimitError,
     ModelTimeoutError,
 )
-from langgraph.errors import GraphRecursionError
+from langgraph.errors import GraphRecursionError, NodeCancelledError
 
 # Only true when no write ran in the turn: deadline_reply picks the honest variant.
 DEADLINE_REPLY = (
@@ -32,6 +32,22 @@ DEADLINE_WRITE_UNFINISHED_REPLY = (
 DEADLINE_AFTER_WRITE_REPLY = (
     "Your approved change was saved, but the rest of this request took too long and was "
     "stopped. Please ask again if you need anything else."
+)
+# A node cancelled itself (LangGraph raises NodeCancelledError for a CancelledError that
+# came from inside a node, such as a tool client's own cancel scope). The same three
+# cases as the deadline: the unfinished node wrote nothing, or it was the write.
+INTERRUPTED_REPLY = (
+    "Sorry, this request was interrupted before it finished. Nothing was changed by the "
+    "unfinished step. Please try again."
+)
+INTERRUPTED_WRITE_UNFINISHED_REPLY = (
+    "Sorry, this request was interrupted while your approved change was being saved. It "
+    "may already have gone through. Send any message and I will finish it; it will not be "
+    "made twice."
+)
+INTERRUPTED_AFTER_WRITE_REPLY = (
+    "Your approved change was saved, but the rest of this request was interrupted. Please "
+    "ask again if you need anything else."
 )
 RECURSION_REPLY = (
     "Sorry, I could not finish this request within my step limit. Please try again, "
@@ -80,6 +96,10 @@ def model_error_reply(error: BaseException) -> str | None:
         if isinstance(error, types):
             return reply
     return None
+
+
+def is_interruption(error: BaseException) -> bool:
+    return isinstance(error, NodeCancelledError)
 
 
 def turn_error_reply(error: BaseException) -> str | None:

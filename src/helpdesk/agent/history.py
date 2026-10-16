@@ -12,6 +12,7 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 
+from helpdesk.agent.model_calls import model_calls
 from helpdesk.shared.errors import ErrorCode, format_tool_error
 
 INTERRUPTED_TOOL_CALL = format_tool_error(
@@ -44,17 +45,52 @@ def answer_orphan_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessag
     for message in messages:
         patched.append(message)
         if isinstance(message, AIMessage):
+            # Invalid calls too: langchain-anthropic sends them as tool_use blocks.
             patched.extend(
                 ToolMessage(
                     content=INTERRUPTED_TOOL_CALL,
-                    tool_call_id=call["id"],
-                    name=call["name"],
+                    tool_call_id=call.id,
+                    name=call.name,
                     status="error",
                 )
-                for call in message.tool_calls
-                if call["id"] is not None and call["id"] not in answered
+                for call in model_calls(message)
+                if call.id not in answered
             )
     return patched
+
+
+def _is_blank_block(block: str | dict[str, object]) -> bool:
+    if isinstance(block, str):
+        return not block.strip()
+    return block.get("type") == "text" and not str(block.get("text", "")).strip()
+
+
+def _without_blank_text(message: AIMessage) -> AIMessage | None:
+    """The reply without blank text; None when nothing at all is left."""
+    content = message.content
+    if isinstance(content, str):
+        kept: str | list[str | dict[str, object]] = content if content.strip() else ""
+    else:
+        kept = [block for block in content if not _is_blank_block(block)]
+    if not kept and not model_calls(message):
+        return None
+    return message if kept == content else message.model_copy(update={"content": kept})
+
+
+def drop_blank_replies(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Leave out what the Claude API would reject in an earlier assistant turn.
+
+    langchain-anthropic 1.7.6 sends string content, and string blocks, as they are, and
+    the API rejects whitespace-only text. A reply with no text and no calls carries
+    nothing, so it is dropped; one with calls keeps them and loses only the blank text.
+    """
+    cleaned: list[BaseMessage] = []
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            cleaned.append(message)
+        elif (kept := _without_blank_text(message)) is not None:
+            cleaned.append(kept)
+    return cleaned
 
 
 def trim_history(messages: Sequence[BaseMessage], *, token_budget: int) -> list[BaseMessage]:
@@ -84,5 +120,6 @@ def trim_history(messages: Sequence[BaseMessage], *, token_budget: int) -> list[
 def model_messages(messages: Sequence[BaseMessage], *, token_budget: int) -> list[BaseMessage]:
     """System prompt first, then the repaired and trimmed conversation."""
     system, conversation = split_system(messages)
-    history = trim_history(answer_orphan_tool_calls(conversation), token_budget=token_budget)
+    repaired = answer_orphan_tool_calls(drop_blank_replies(conversation))
+    history = trim_history(repaired, token_budget=token_budget)
     return [system, *history] if system is not None else history

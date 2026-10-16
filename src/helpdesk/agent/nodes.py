@@ -6,11 +6,12 @@ tool retry layer. Transport failures become UPSTREAM_UNAVAILABLE results at once
 
 import asyncio
 import json
+import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Sequence
 
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
-from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolCall, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.store.base import BaseStore
@@ -20,42 +21,53 @@ from pydantic import JsonValue, ValidationError
 from helpdesk.agent.decision import approves
 from helpdesk.agent.history import model_messages
 from helpdesk.agent.memory import Clock, load_facts
+from helpdesk.agent.model_calls import (
+    MISSING_ID,
+    ModelCall,
+    is_truncated,
+    model_calls,
+    normalize_response,
+)
 from helpdesk.agent.prompt import system_message
 from helpdesk.agent.prompt_caching import cacheable_system_message
 from helpdesk.agent.proposal import InvalidProposalError, build_pending_action
 from helpdesk.agent.routing import (
     LOCAL_TOOL_NAMES,
-    ONE_CHANGE_AT_A_TIME,
     READ_TOOL_NAMES,
+    WRITE_TOOL_NAMES,
     Node,
     ToolCallBatch,
     classify_tool_calls,
     last_ai_message,
-    unknown_tool_error,
+    proposable,
 )
 from helpdesk.agent.run_config import user_id_from_config
 from helpdesk.agent.state import AgentState
-from helpdesk.agent.tool_messages import (
-    TRANSPORT_FAILURE,
-    USER_DECLINED,
-    elapsed_ms,
-    tool_message,
+from helpdesk.agent.tool_errors import (
+    REMEMBER_FACT_NEXT_STEP,
+    internal_failure,
+    invalid_args_error,
+    missing_id_error,
+    rejected_batch_error,
+    truncated_call_error,
+    unknown_tool_error,
+    unparseable_args_error,
 )
-from helpdesk.agent.tool_provider import ToolProvider, ToolResult, ToolTransportError
+from helpdesk.agent.tool_messages import declined_message, elapsed_ms, tool_message
+from helpdesk.agent.tool_provider import ToolProvider
+from helpdesk.agent.tool_results import call_tool
 from helpdesk.shared.approval import PendingAction, WriteResult
-from helpdesk.shared.errors import ErrorCode, format_tool_error, parse_tool_error
+from helpdesk.shared.errors import parse_tool_error
 from helpdesk.shared.memory import RememberFactArgs
 from helpdesk.shared.tools import INJECTED_ARGS
+
+logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_KEY_ARG = "idempotency_key"
 
 
 class GraphStateError(RuntimeError):
     """A node ran in a state the topology should make impossible."""
-
-
-def _call_id(call: ToolCall) -> str:
-    return call["id"] or ""
 
 
 def injected_args(pending: PendingAction, user_id: str) -> dict[str, JsonValue]:
@@ -74,6 +86,24 @@ def _parse_result(text: str) -> JsonValue:
     return parsed
 
 
+def _rejected(call: ModelCall, message: AIMessage, calls: Sequence[ModelCall]) -> str | None:
+    """The error for a call that must not run, or None when it may.
+
+    Most basic cause first: a cut-off reply explains its unparseable calls, and a call
+    that could never run is not also blamed on the batch it came in.
+    """
+    if is_truncated(message):
+        return truncated_call_error(call.name)
+    if call.invalid == MISSING_ID:
+        return missing_id_error(call.name)
+    if call.invalid is not None:
+        return unparseable_args_error(call.name)
+    if classify_tool_calls(calls) is ToolCallBatch.REJECTED or call.name in WRITE_TOOL_NAMES:
+        # A write reaches this node only next to other calls; it never runs here.
+        return rejected_batch_error([c.name for c in calls])
+    return None
+
+
 class AgentNodes:
     def __init__(
         self,
@@ -81,6 +111,7 @@ class AgentNodes:
         model: BaseChatModel,
         bound_model: Runnable[LanguageModelInput, AIMessage],
         tool_provider: ToolProvider,
+        tool_names: Sequence[str],
         remember_fact_tool: BaseTool,
         history_token_budget: int,
         clock: Clock,
@@ -88,6 +119,8 @@ class AgentNodes:
         self._model = model
         self._bound_model = bound_model
         self._tools = tool_provider
+        # The names bound to the model, in order: what an unknown-tool error offers.
+        self._tool_names = tuple(tool_names)
         self._remember_fact = remember_fact_tool
         self._history_token_budget = history_token_budget
         self._clock = clock
@@ -106,90 +139,91 @@ class AgentNodes:
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = cacheable_system_message(messages[0], self._model)
         response = await self._bound_model.ainvoke(messages, config)
-        return {"messages": [response]}
+        return {"messages": [normalize_response(response)]}
 
     async def tools(
         self, state: AgentState, config: RunnableConfig, store: BaseStore
     ) -> AgentState:
+        """One ToolMessage per call of the last reply, in the model's order."""
         message = last_ai_message(state)
         if message is None:
             raise GraphStateError("tools ran without an AI message")
-        calls = message.tool_calls
-        if classify_tool_calls(calls) is ToolCallBatch.REJECTED:
-            rejected: list[AnyMessage] = [
-                tool_message(
-                    call_id=_call_id(call),
-                    name=call["name"],
-                    text=ONE_CHANGE_AT_A_TIME,
-                    is_error=True,
-                )
-                for call in calls
-            ]
-            return {"messages": rejected}
+        calls = model_calls(message)
         results: list[AnyMessage] = list(
-            await asyncio.gather(*(self._run_call(call, config, store) for call in calls))
+            await asyncio.gather(
+                *(self._answer(call, message, calls, config, store) for call in calls)
+            )
         )
         return {"messages": results}
 
-    async def _run_call(
-        self, call: ToolCall, config: RunnableConfig, store: BaseStore
+    async def _answer(
+        self,
+        call: ModelCall,
+        message: AIMessage,
+        calls: Sequence[ModelCall],
+        config: RunnableConfig,
+        store: BaseStore,
     ) -> ToolMessage:
-        name = call["name"]
-        if name in READ_TOOL_NAMES:
-            return await self._call_provider(call["name"], _call_id(call), call["args"])
-        if name in LOCAL_TOOL_NAMES:
+        rejected = _rejected(call, message, calls)
+        if rejected is not None:
+            return tool_message(call_id=call.id, name=call.name, text=rejected, is_error=True)
+        if call.name in LOCAL_TOOL_NAMES:
             return await self._remember(call, config, store)
-        return tool_message(
-            call_id=_call_id(call), name=name, text=unknown_tool_error(name), is_error=True
-        )
+        if call.name in READ_TOOL_NAMES and call.name in self._tool_names:
+            return await self._read(call)
+        # Only a tool the model was given, and that we know to be a read, ever runs.
+        text = unknown_tool_error(call.name, self._tool_names)
+        return tool_message(call_id=call.id, name=call.name, text=text, is_error=True)
 
-    async def _call_provider(
-        self, name: str, call_id: str, args: Mapping[str, JsonValue]
-    ) -> ToolMessage:
+    async def _read(self, call: ModelCall) -> ToolMessage:
         started = time.perf_counter()
-        result = await self._provider_result(name, args)
+        result = await call_tool(self._tools, call.name, call.args, write=False)
         return tool_message(
-            call_id=call_id,
-            name=name,
+            call_id=call.id,
+            name=call.name,
             text=result.text,
             is_error=result.is_error,
             latency_ms=elapsed_ms(started, time.perf_counter()),
         )
 
-    async def _provider_result(self, name: str, args: Mapping[str, JsonValue]) -> ToolResult:
-        try:
-            return await self._tools.call(name, args)
-        except ToolTransportError:
-            return ToolResult(text=TRANSPORT_FAILURE, is_error=True)
-
     async def _remember(
-        self, call: ToolCall, config: RunnableConfig, store: BaseStore
+        self, call: ModelCall, config: RunnableConfig, store: BaseStore
     ) -> ToolMessage:
         started = time.perf_counter()
         try:
-            args = RememberFactArgs.model_validate(call["args"])
-        except ValidationError:
+            args = RememberFactArgs.model_validate(call.args)
+        except ValidationError as error:
             # The schema has no user id on purpose; extra arguments are rejected here.
-            text = format_tool_error(
-                ErrorCode.INVALID_ARGUMENT,
-                "remember_fact takes only `key` (team, office_location, device, "
-                "preferred_contact) and `value` (1-200 characters)",
+            text = invalid_args_error(
+                call.name, error, RememberFactArgs, next_step=REMEMBER_FACT_NEXT_STEP
             )
-            return tool_message(call_id=_call_id(call), name=call["name"], text=text, is_error=True)
-        # InjectedStore: the store is passed as a trusted argument, never by the model.
-        output = await self._remember_fact.ainvoke(
-            {
-                "type": "tool_call",
-                "id": _call_id(call),
-                "name": call["name"],
-                "args": {"key": args.key, "value": args.value, "store": store},
-            },
-            config,
-        )
+            return tool_message(call_id=call.id, name=call.name, text=text, is_error=True)
+        try:
+            # InjectedStore: the store is passed as a trusted argument, never by the model.
+            output = await self._remember_fact.ainvoke(
+                {
+                    "type": "tool_call",
+                    "id": call.id,
+                    "name": call.name,
+                    "args": {"key": args.key, "value": args.value, "store": store},
+                },
+                config,
+            )
+        except Exception as error:
+            logger.warning("remember_fact raised %s", type(error).__name__)
+            cause = f"saving the fact raised {type(error).__name__}"
+            text = internal_failure(call.name, cause, write=False)
+            return tool_message(
+                call_id=call.id,
+                name=call.name,
+                text=text,
+                is_error=True,
+                latency_ms=elapsed_ms(started, time.perf_counter()),
+            )
         text = output.text if isinstance(output, ToolMessage) else str(output)
         return tool_message(
-            call_id=_call_id(call),
-            name=call["name"],
+            call_id=call.id,
+            name=call.name,
             text=str(text),
             is_error=False,
             latency_ms=elapsed_ms(started, time.perf_counter()),
@@ -197,14 +231,14 @@ class AgentNodes:
 
     async def propose(self, state: AgentState) -> AgentState:
         message = last_ai_message(state)
-        if message is None or len(message.tool_calls) != 1:
-            raise GraphStateError("propose needs exactly one write tool call")
+        if message is None or not proposable(message):
+            raise GraphStateError("propose needs exactly one complete write tool call")
         call = message.tool_calls[0]
         try:
             pending = build_pending_action(call)
         except InvalidProposalError as error:
             invalid = tool_message(
-                call_id=_call_id(call), name=call["name"], text=error.tool_error, is_error=True
+                call_id=call["id"] or "", name=call["name"], text=error.tool_error, is_error=True
             )
             return {"messages": [invalid], "pending_action": None}
         return {"pending_action": pending}
@@ -220,6 +254,11 @@ class AgentNodes:
         )
 
     async def execute_write(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        """Run the approved write once; see `tool_results` for which failures are caught.
+
+        A cancellation or process exit mid-call is not: the node then never finishes, so
+        the next request re-runs it with the same idempotency key.
+        """
         pending = state.get("pending_action")
         if pending is None:
             raise GraphStateError("execute_write ran without a pending action")
@@ -228,7 +267,7 @@ class AgentNodes:
             **injected_args(pending, user_id_from_config(config)),
         }
         started = time.perf_counter()
-        result = await self._provider_result(pending.tool.value, args)
+        result = await call_tool(self._tools, pending.tool.value, args, write=True)
         latency = elapsed_ms(started, time.perf_counter())
         error = parse_tool_error(result.text) if result.is_error else None
         last_write = WriteResult(
@@ -253,10 +292,5 @@ class AgentNodes:
         pending = state.get("pending_action")
         if pending is None:
             raise GraphStateError("record_decline ran without a pending action")
-        declined = tool_message(
-            call_id=pending.tool_call_id,
-            name=pending.tool.value,
-            text=USER_DECLINED,
-            is_error=False,
-        )
+        declined = declined_message(call_id=pending.tool_call_id, name=pending.tool.value)
         return {"pending_action": None, "messages": [declined]}

@@ -16,8 +16,12 @@ CONFIG = build_run_config("alice", "s1", recursion_limit=25)
 COMMENT = {"ticket_id": "INC-0003", "body": "Dropped again at 10:00."}
 
 
-class CrashInsideWriteError(RuntimeError):
-    pass
+class CrashInsideWriteError(BaseException):
+    """Stands in for the process dying mid-call: not an Exception, so nothing catches it.
+
+    An ordinary Exception from the provider is a tool failure the graph answers instead
+    (test_bad_responses.py).
+    """
 
 
 def _script(fake_model, make_ai):

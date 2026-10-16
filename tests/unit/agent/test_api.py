@@ -28,8 +28,12 @@ CREATE_ARGS = {
 _REQUEST = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 
 
-class CrashInsideWriteError(RuntimeError):
-    pass
+class CrashInsideWriteError(BaseException):
+    """Stands in for the process dying mid-call: not an Exception, so nothing catches it.
+
+    An ordinary Exception from the provider is a tool failure the graph answers instead
+    (test_bad_responses.py).
+    """
 
 
 def _proposal_script(fake_model, make_ai, *after):

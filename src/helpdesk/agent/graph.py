@@ -58,6 +58,7 @@ async def build_graph(
         model=model,
         bound_model=bind_tool_definitions(model, definitions),
         tool_provider=tool_provider,
+        tool_names=[definition.name for definition in definitions],
         remember_fact_tool=build_remember_fact_tool(ttl_days=settings.fact_ttl_days, clock=clock),
         history_token_budget=settings.history_token_budget,
         clock=clock,

@@ -27,6 +27,8 @@ class ToolResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # The result's text content; "" when it had none (only non-text content, or nothing).
+    # The graph turns such a result into an INTERNAL error rather than pass it on.
     text: str
     is_error: bool
 

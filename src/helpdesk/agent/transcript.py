@@ -2,10 +2,11 @@
 
 from collections.abc import Collection, Sequence
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolCall, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import JsonValue
 
-from helpdesk.agent.tool_messages import latency_of
+from helpdesk.agent.model_calls import ModelCall, model_calls
+from helpdesk.agent.tool_messages import is_declined, latency_of
 from helpdesk.shared.api import (
     MessageRole,
     PendingActionView,
@@ -40,41 +41,48 @@ def message_text(message: BaseMessage) -> str:
 def tool_call_records(
     messages: Sequence[BaseMessage], new_message_ids: Collection[str]
 ) -> list[ToolCallRecord]:
-    """The tool calls that actually ran during this request, in order."""
-    calls: dict[str, ToolCall] = {
-        call["id"]: call
+    """Every tool call answered during this request, in order (CONTRACTS §3.1).
+
+    Rejected and unparseable calls are included with their error and 0 ms, since they
+    never ran. A declined write is not: nothing ran, and nothing failed.
+    """
+    calls: dict[str, ModelCall] = {
+        call.id: call
         for message in messages
         if isinstance(message, AIMessage)
-        for call in message.tool_calls
-        if call["id"] is not None
+        for call in model_calls(message)
     }
     records: list[ToolCallRecord] = []
     for message in messages:
         if not isinstance(message, ToolMessage) or message.id not in new_message_ids:
             continue
-        latency = latency_of(message)
-        if latency is None:
+        if is_declined(message):
             continue
         call = calls.get(message.tool_call_id)
         text = message_text(message)
         is_error = message.status == "error"
         records.append(
             ToolCallRecord(
-                name=call["name"] if call is not None else (message.name or ""),
-                args=visible_args(call["args"]) if call is not None else {},
+                name=call.name if call is not None else (message.name or ""),
+                args=visible_args(call.args) if call is not None else {},
                 result_summary=summarize_result(text),
                 error=text if is_error else None,
-                latency_ms=latency,
+                latency_ms=latency_of(message) or 0,
             )
         )
     return records
 
 
-def last_ai_text(messages: Sequence[BaseMessage]) -> str:
+def last_ai_message(messages: Sequence[BaseMessage]) -> AIMessage | None:
     for message in reversed(messages):
         if isinstance(message, AIMessage):
-            return message_text(message).strip()
-    return ""
+            return message
+    return None
+
+
+def last_ai_text(messages: Sequence[BaseMessage]) -> str:
+    message = last_ai_message(messages)
+    return message_text(message).strip() if message is not None else ""
 
 
 def session_messages(messages: Sequence[BaseMessage]) -> list[SessionMessage]:
