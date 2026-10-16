@@ -1,12 +1,19 @@
 """CONTRACTS §6 for the mock: telemetry is set up when the app starts, server spans land in
 traces/mock.jsonl, a caller's traceparent is joined, and no token ever reaches a span."""
 
+import asyncio
 import json
 import re
+from collections.abc import Callable, MutableMapping
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.telemetry import _runtime as fastapi_runtime
+
+from helpdesk.mock.app import create_app
+from helpdesk.shared.settings import Settings
 
 TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SPAN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -123,3 +130,52 @@ async def test_no_token_or_credential_header_reaches_the_traces(
     assert any(key.endswith("idempotency_key") for r in records for key in r["attributes"]), (
         "header capture was off, so the test proves nothing"
     )
+
+
+async def _start_and_stop(app: FastAPI, while_running: Callable[[], None]) -> None:
+    """Drive the app's real ASGI lifespan, as uvicorn does. The harness enters
+    `router.lifespan_context` directly, which skips FastAPI's own startup hook."""
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    sent: list[str] = []
+    started = asyncio.Event()
+
+    async def receive() -> dict[str, Any]:
+        return await inbox.get()
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message["type"])
+        if message["type"].startswith("lifespan.startup."):
+            started.set()
+
+    task = asyncio.create_task(app({"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send))
+    await inbox.put({"type": "lifespan.startup"})
+    await asyncio.wait_for(started.wait(), timeout=10)
+    while_running()
+    await inbox.put({"type": "lifespan.shutdown"})
+    await asyncio.wait_for(task, timeout=10)
+    assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+
+
+async def test_fastapi_native_telemetry_stays_off_through_the_real_startup(
+    mock_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without `telemetry=fastapi_telemetry_config()` this env var would turn FastAPI's
+    # auto-configure on, and its startup would try to add OTLP exporters that bypass our
+    # redaction. The span tests cannot see that: the server span looks the same either way.
+    monkeypatch.setenv("FASTAPI_OTEL_AUTO_CONFIGURE", "true")
+    # Recorded, never run: on a regression the real one would install global providers.
+    configs: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        fastapi_runtime, "_configure_from_environment", lambda config: configs.append(dict(config))
+    )
+    app = create_app(mock_settings)
+    native_enabled: list[bool] = []
+
+    # FastAPI 0.143 has no public accessor for its effective telemetry config.
+    await _start_and_stop(app, lambda: native_enabled.append(app._native_telemetry.enabled()))
+
+    (config,) = configs
+    switches = ("auto_configure", "tracing", "operation_spans", "metrics", "logs")
+    assert {name: config[name] for name in switches} == dict.fromkeys(switches, False)
+    # Checked while our provider is installed, when FastAPI would otherwise trace too.
+    assert native_enabled == [False]

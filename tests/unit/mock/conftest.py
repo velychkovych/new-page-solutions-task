@@ -136,6 +136,13 @@ def make_settings(traces_dir: Path, **overrides: Any) -> Settings:
 
 
 @pytest.fixture
+def mock_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Settings for a test that builds and drives the app itself, outside the harness."""
+    _clear_env(monkeypatch)
+    return make_settings(tmp_path / "traces", mock_db_path=tmp_path / "mock.sqlite")
+
+
+@pytest.fixture
 def mock_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MockFactory:
     _clear_env(monkeypatch)
     counter = 0
