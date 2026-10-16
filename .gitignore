@@ -26,3 +26,7 @@ build/
 
 # deterministic eval tier output (`python -m evals.run --fake`); live results are committed
 evals/results/fake/
+
+# DeepEval's cache/results folder, should anything ever run it from the repo root (evals/
+# points it at a temp dir; see evals/__init__.py)
+.deepeval/

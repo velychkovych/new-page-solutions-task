@@ -36,6 +36,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "deepeval>=4.3.0",
     "mypy>=2.4.0",
     "nodejs-wheel-binaries>=24.19.0",
     "pre-commit>=4.7.0",
@@ -99,7 +100,18 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = ["-ra", "--import-mode=importlib", "--strict-markers", "--strict-config", "-m", "not e2e and not live"]
+# deepeval (dev group, for evals/) installs pytest plugins that load into every session:
+# its own (Confident AI test runs, telemetry), xdist, repeat and rerunfailures. Disabled,
+# so `make test` runs exactly as before; evals/ uses DeepEval as a library, not a plugin.
+addopts = [
+    "-ra", "--import-mode=importlib", "--strict-markers", "--strict-config",
+    "-m", "not e2e and not live",
+    "-p", "no:deepeval", "-p", "no:xdist", "-p", "no:xdist.looponfail",
+    "-p", "no:repeat", "-p", "no:rerunfailures",
+]
+# deepeval's tracing decorator calls asyncio.iscoroutinefunction (deprecated in 3.14) for
+# every metric and judge method; a third-party warning we cannot act on.
+filterwarnings = ["ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:deepeval"]
 markers = [
     "e2e: needs the docker compose stack (`make up`); run with `make test-e2e`",
     "live: calls a real model API; never part of `make test`",
