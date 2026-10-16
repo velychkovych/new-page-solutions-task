@@ -464,3 +464,138 @@ Notable fixes made after review:
   traces is unwanted (E).
 - Evals: a "network" search at the default limit puts INC-0010, INC-0014 and INC-0015 on
   page 2. INC-0013 is the prompt-injection fixture (A).
+
+---
+
+## 2026-10-16 — Phase 1 follow-up: the author's answers to the open questions
+
+### Author decisions (numbered as in the Phase 1 "Unsure" list)
+
+| # | Decision | Result |
+|---|---|---|
+| 1 | Cache-write tokens on the streaming path → a telemetry span processor | Done (Track E) |
+| 2 | Add 405 / undecodable body to the contract only if something uses them | No contract change. No client relies on 405, and an undecodable body is already covered by the existing 422 `invalid_request` row |
+| 3 | Cursor: change it only if it causes bugs, otherwise leave it | Left as is. The strict offset ≥ 1 still works when `page_size` changes mid-walk and when tickets are created between pages |
+| 4 | Explicit errors the agent can handle; strict mode only if it prevents bugs | New `INTERNAL` code; specific error texts (Tracks B, C). No strict shared models: measured on JSON inputs, strict and lax accept the same agent write arguments, and the MCP server already validates strictly |
+| 5 | The agent handles bad responses as needed | Done (Track C) |
+| 6 | Telemetry is set up when the app starts | Done for mock, MCP and agent (Tracks A, B, C on top of E) |
+| 7 | Node required; pre-commit excludes `.sse`; Phase 2 serves `web/fixtures/` | Node from `nodejs-wheel-binaries` (dev dependency); the fixtures exclusion is done; serving the fixtures is a Phase 2 task |
+| 8 | Document that traces keep conversation text untruncated | A fact bullet in README "Known limitations" |
+
+### Delegated to AI, and what changed
+
+- **Orchestrator (on master):**
+  - `ae9b408`: the page behaviour tests use the pinned `node` 24.19.0 from `.venv`
+    (`nodejs_wheel.executable.ROOT_DIR`) and fail instead of skipping when it is missing. The
+    pre-commit end-of-file and whitespace hooks now exclude `web/fixtures/*.sse`.
+  - `cfa57b3`: `ErrorCode.INTERNAL`; CONTRACTS §2.4 gets an `INTERNAL` row and a
+    specific-error-text rule.
+  - `3504caf`: README fact about untruncated conversation text in traces.
+  - `a4ce2e4`: contract changes:
+    - CONTRACTS §3.1: `tool_calls` lists rejected and unparseable calls, with `error` set and
+      `latency_ms: 0`.
+    - CONTRACTS §5.3: `invalid_tool_calls` are answered, and every error `ToolMessage` and
+      the decline have `status="error"`.
+    - CONTRACTS §6: telemetry is set up at app start.
+- **Two workflows, each running build → review → fix in isolated worktrees, 12 agents in total:**
+  - **E (telemetry):**
+    - `CacheWriteSpanProcessor` derives the cache-write count in the export path. In SDK
+      1.45.1 a span is immutable before any processor hook runs, so it cannot be set
+      earlier.
+    - A process-global `DelegatingTracerProvider` makes setup and shutdown repeatable and
+      reference-counted per service.
+    - New `telemetry_lifespan()`.
+    - `instrument_app()` is now called from the app factory.
+    - New `fastapi_telemetry_config()` turns off FastAPI's native tracing and logs.
+    - Review: 5 findings; 4 fixed, 1 was an ai-log request.
+  - **A (mock):** telemetry at app start. Tests cover joining an incoming traceparent,
+    `/health` not traced, and no token in the JSONL even with all header capture on.
+    Review: 1 finding, fixed.
+  - **B (MCP):**
+    - Telemetry is chained into the FastMCP Starlette app's lifespan.
+    - `CaptureTraceContext` middleware: in mcp 1.30.0, tool calls run in the task started by
+      the `initialize` request, so without it every tool span joined that request's trace.
+    - `INTERNAL` for unexpected failures.
+    - Every error text names the tool, the cause, the attempts and one next step. Write
+      errors distinguish "not applied" from "could not confirm whether the change was
+      applied".
+    - Review: 5 findings, all fixed. Model-supplied text is kept out of error texts, the
+      write next steps say not to propose the same write again, and FastMCP's
+      `Unknown tool` text is mapped into the contract format.
+  - **C (agent):**
+    - Telemetry at app start, so `trace_id` is real.
+    - New modules `model_calls`, `tool_errors`, `tool_results` and `final_reply`.
+    - Every tool call is answered exactly once, including `invalid_tool_calls`, a missing
+      id (given a generated id) and calls cut off by a truncated reply.
+    - Malformed or empty tool results become `INTERNAL`.
+    - A blank final answer gets a deterministic reply.
+    - Review: 3 findings, all fixed.
+
+### Verified, and how
+
+- Merged master:
+  - `make lint` → `All checks passed!`, `131 files already formatted`
+  - `make typecheck` → `Success: no issues found in 72 source files`
+  - `make test` → `889 passed, 7 warnings` (3 runs, identical)
+- No test writes `./traces`, and no test exports OTLP.
+- Every branch's diff stays inside its track's paths.
+- Reviewers ran mutation probes on scratch copies:
+  - E: 16/16 caught, after one test was added.
+  - A: dropping `fastapi_telemetry_config()` was not caught; a test was added.
+  - B and C: the surviving mutants were covered by the fixes above.
+
+### Deviations, and why
+
+- **Crash rule for writes (C):**
+  - Only a `BaseException` (process death, cancellation, deadline) leaves `execute_write`
+    to be re-run with the same key.
+  - An ordinary exception from the provider is now a failed write: an `INTERNAL` "could not
+    be confirmed" `ToolMessage`, `pending_action` cleared, no retry.
+  - The crash/restart tests now simulate a crash with a `BaseException` subclass.
+- **Non-contract error text (C):** an `is_error` result whose text is not in the contract
+  format is never passed to the model; it becomes `INTERNAL`.
+- **Truncated reply (C):** a truncated reply has all its calls rejected, not only the last
+  one.
+- **Cancellation (C):** a `CancelledError` raised by a node gets an `INTERRUPTED_*` reply with
+  status `error`, instead of a 500.
+- **Entry point (B):** `uvicorn.Config(lifespan="on")`. With `"auto"`, a startup error made
+  uvicorn serve without telemetry and without the session manager.
+- **Telemetry lifecycle (E):** shutdown no longer uninstruments httpx and LangChain; they are
+  instrumented once per process. `instrument_app` raises if the app has already started.
+
+### Library notes added
+
+- opentelemetry-sdk 1.45.1: a span's attributes are frozen before any processor hook runs
+  (`_on_ending` is private). A derived attribute has to go on a copy in the export path.
+- opentelemetry-api 1.45.1: `ProxyTracer` binds permanently to the first global provider.
+  OpenInference's `OITracer` calls `tracer.__class__.start_span(proxy, …)` to use its
+  seed-independent id generator.
+- mcp 1.30.0: `StreamableHTTPSessionManager` runs tool calls in the task started by the
+  `initialize` request, so contextvars (including the OTel context) come from that request.
+- uvicorn 0.54: with `lifespan="auto"`, an error raised before `lifespan.startup.failed` is
+  sent is treated as "lifespan unsupported".
+- FastAPI 0.143.2 copies the `telemetry=` mapping it is given.
+
+### Unsure — author should review
+
+1. **Unconfirmed write, then a user re-ask (B-2 follow-up).** After a write times out or
+   exhausts its retries, the next step tells the model not to propose it again unless the
+   user asks. If the user does ask, the new proposal gets a new idempotency key. A write that
+   did commit could then be applied twice. Preventing this would need agent-side work, for
+   example reusing the key for an identical proposal.
+2. **Status for unusual endings.** A blank final answer returns status `ok`; `INTERRUPTED_*`
+   replies return status `error`. CONTRACTS §3.4 does not list either.
+3. **Contract table rows.**
+   - FastMCP's "unknown tool" maps to `INVALID_ARGUMENT`.
+   - A mock 404 on search/create (only possible with a wrong `MOCK_URL`) stays `NOT_FOUND`,
+     with text that says misconfiguration.
+   - Neither is a row in CONTRACTS §2.4.
+4. **`unnamed_tool` placeholder.** An `invalid_tool_call` with no name is given this name,
+   so its tool_use and tool_result stay paired. This is not verified against the live
+   Claude API.
+5. **Fragile hooks that a library upgrade could break:**
+   - B replaces the Starlette `app.router.lifespan_context` (public, but not a documented
+     extension point).
+   - A mock test reads two FastAPI 0.143 internals.
+6. **Phase 2 in-process tests** cannot run the lifespans of two different services at the
+   same time (one service per process, by design).
