@@ -204,6 +204,12 @@ The full list is in [`.env.example`](.env.example): one line per `Settings` fiel
   - expiry of pending approvals
   - cleanup or retention jobs for old checkpoints
 - No `temperature` is set for any model; every provider runs with its default.
+- Traces store conversation text untruncated:
+  - OpenInference records the full model input and output (`input.value`, `output.value`,
+    `llm.input_messages`, `llm.output_messages`) in `traces/*.jsonl` and in Jaeger.
+  - The exporter scrubs secrets (tokens, API keys, auth headers) and truncates only
+    `helpdesk.tool.result` (2 KB).
+  - User messages and ticket text are kept as they are.
 
 ## Demo
 
