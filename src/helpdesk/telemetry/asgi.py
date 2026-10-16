@@ -40,8 +40,11 @@ def fastapi_telemetry_config() -> TelemetryConfig:
     - metrics: the same HTTP server metrics as the ASGI instrumentation;
     - logs: unhandled exception messages and stack traces, which can hold input values,
       sent to the OTel logs pipeline that no redactor covers;
-    - auto_configure: OTLP exporters added from env vars, outside the redacting exporter.
-    A new dict each call, because FastAPI keeps the mapping it is given.
+    - auto_configure: off too, so `FASTAPI_OTEL_AUTO_CONFIGURE=true` cannot ask for OTLP
+      exporters outside the redacting one. With the three signals off FastAPI would find
+      nothing to configure anyway, so this is a second guard, not the operative switch.
+    FastAPI copies the mapping into its own config, so one result may be shared between
+    apps; it is a function only so no caller can change a module-level value.
     """
     return {
         "tracing": False,

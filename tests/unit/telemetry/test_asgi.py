@@ -278,3 +278,18 @@ async def test_fastapi_config_switches_off_the_built_in_telemetry(
 
     assert _records(path) == []
     assert otel_logs.get_finished_logs() == ()
+
+
+async def test_fastapi_keeps_its_own_copy_of_the_config(make_settings: Any) -> None:
+    settings: Settings = make_settings()
+    telemetry = setup_telemetry("agent", settings)
+    config = fastapi_telemetry_config()
+    app = _items_app(config)
+
+    # Changing the dict after the app is built must not switch FastAPI's tracing back on.
+    config["tracing"] = True
+    config["operation_spans"] = True
+    await _post_items(app)
+    assert telemetry.flush()
+
+    assert _records(settings.traces_dir / "agent.jsonl") == []
