@@ -8,7 +8,8 @@ Live tier (default): the compose service `agent-eval` with the real model; costs
 results go to evals/results/fake/ and never replace the committed live results.
 
 Exit status: 0 every run passed, 1 a run failed (results are written either way),
-2 an infrastructure error (stack not reachable, a command failed) or bad arguments.
+2 an infrastructure error (stack not reachable, a command failed) or bad arguments. An
+infrastructure error after some runs finished still writes their results, marked aborted.
 """
 
 import argparse
@@ -108,9 +109,13 @@ async def open_stack(fake: bool, model: str | None) -> AsyncIterator[Stack]:
 
 
 async def run_cases(
-    stack: Stack, cases: Sequence[Case], repeats: int, progress: Progress
-) -> list[CaseRunResult]:
-    results: list[CaseRunResult] = []
+    stack: Stack,
+    cases: Sequence[Case],
+    repeats: int,
+    progress: Progress,
+    results: list[CaseRunResult],
+) -> None:
+    """Appends each run's result as it finishes, so the caller keeps them if one fails."""
     total = len(cases) * repeats
     async with httpx.AsyncClient() as client:
         for case in cases:
@@ -124,7 +129,6 @@ async def run_cases(
                 )
                 for reason in result.reasons:
                     progress(f"    - {reason}")
-    return results
 
 
 async def evaluate_cases(
@@ -140,8 +144,16 @@ async def evaluate_cases(
     started = utc_now()
     # Before the run: what was checked out when it started is what it measured.
     sha, dirty = await git_state()
-    async with open_stack(fake, model) as stack:
-        results = await run_cases(stack, cases, repeats, progress)
+    results: list[CaseRunResult] = []
+    aborted: str | None = None
+    try:
+        async with open_stack(fake, model) as stack:
+            await run_cases(stack, cases, repeats, progress, results)
+    except StackError as exc:
+        if not results:
+            raise
+        # Hours of finished runs are worth keeping; the report says they are not all.
+        aborted = f"infrastructure error after {len(results)} of {len(cases) * repeats} runs: {exc}"
     metadata = RunMetadata(
         started_at=started,
         finished_at=utc_now(),
@@ -154,6 +166,7 @@ async def evaluate_cases(
         repeats=repeats,
         chaos_only=chaos_only,
         case_filter=list(case_filter),
+        aborted=aborted,
     )
     return build_report(metadata, cases, results)
 
@@ -203,6 +216,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     write_report(report, args.out)
     for line in summary_lines(report, args.out):
         print(line)
+    if report.metadata.aborted is not None:
+        print(f"aborted: {report.metadata.aborted}", file=sys.stderr)
+        return EXIT_INFRA
     return EXIT_OK if report.overall.passes == report.overall.runs else EXIT_FAILED
 
 

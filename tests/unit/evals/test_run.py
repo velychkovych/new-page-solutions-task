@@ -196,3 +196,82 @@ async def test_the_git_state_is_taken_before_the_stack_starts(
     )
     assert order == ["git", "stack"]
     assert report.metadata.git_sha == "abc"
+
+
+def _result(case_id: str = "unit_case", run: int = 1) -> CaseRunResult:
+    return CaseRunResult(
+        case_id=case_id,
+        plan_case=[1],
+        run=run,
+        passed=True,
+        reasons=[],
+        turns=[],
+        duration_s=0.1,
+        tokens=TokenUsage(),
+        models=[],
+        providers=[],
+    )
+
+
+async def _evaluate_breaking_after(monkeypatch: pytest.MonkeyPatch, finished: int) -> Report:
+    async def fake_git_state() -> tuple[str, bool]:
+        return "abc", False
+
+    @asynccontextmanager
+    async def fake_open_stack(*_: Any) -> AsyncIterator[None]:
+        yield None
+
+    async def breaks(*args: Any) -> None:
+        results: list[CaseRunResult] = args[-1]
+        results += [_result(run=i) for i in range(1, finished + 1)]
+        raise StackError("mock GET /admin/writes returned 502")
+
+    monkeypatch.setattr(run_module, "git_state", fake_git_state)
+    monkeypatch.setattr(run_module, "open_stack", fake_open_stack)
+    monkeypatch.setattr(run_module, "run_cases", breaks)
+    return await run_module.evaluate_cases(
+        [make_case()],
+        fake=True,
+        model=None,
+        repeats=3,
+        chaos_only=False,
+        case_filter=[],
+        progress=lambda _: None,
+    )
+
+
+async def test_an_infrastructure_error_mid_run_keeps_the_finished_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = await _evaluate_breaking_after(monkeypatch, finished=2)
+    assert report.overall.runs == 2
+    assert report.metadata.aborted == (
+        "infrastructure error after 2 of 3 runs: mock GET /admin/writes returned 502"
+    )
+
+
+async def test_an_infrastructure_error_before_any_run_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(StackError):
+        await _evaluate_breaking_after(monkeypatch, finished=0)
+
+
+def test_an_aborted_run_writes_its_results_marked_aborted_and_exits_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    aborted = "infrastructure error after 1 of 3 runs: agent-eval is not healthy"
+    report = _report(True)
+    report = report.model_copy(
+        update={"metadata": report.metadata.model_copy(update={"aborted": aborted})}
+    )
+
+    async def fake_evaluate(*_: Any, **__: Any) -> Report:
+        return report
+
+    monkeypatch.setattr(run_module, "evaluate_cases", fake_evaluate)
+    assert main(["--fake", "--out", str(tmp_path)]) == EXIT_INFRA
+    assert f"aborted: {aborted}" in capsys.readouterr().err
+    written = Report.model_validate_json((tmp_path / "latest.json").read_text())
+    assert written.metadata.aborted == aborted
+    assert f"**Aborted: {aborted}.**" in (tmp_path / "latest.md").read_text()
