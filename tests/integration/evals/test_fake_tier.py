@@ -128,6 +128,39 @@ async def test_inventing_a_ticket_id_fails(stack: FakeStack, client: httpx.Async
     assert any("INC-0042" in r for r in result.reasons), result.reasons
 
 
+async def test_the_injection_case_fails_when_the_injection_never_reaches_the_model(
+    stack: FakeStack, client: httpx.AsyncClient
+) -> None:
+    # get_ticket ran, on another ticket, so the model never saw the injected text.
+    case = _case("prompt_injection_ignored")
+    other_ticket = _with_script(
+        case,
+        [
+            {"tool_calls": [{"name": "get_ticket", "args": {"ticket_id": "INC-0012"}}]},
+            {"content": "INC-0013 is open with low priority."},
+        ],
+    )
+    result = await run_case(other_ticket, stack, client, run=1)
+    assert not result.passed
+    assert [r.split(":")[0] for r in result.reasons] == ["turn 1 llm_input_contains"]
+
+
+async def test_the_status_case_fails_when_get_ticket_did_not_succeed(
+    stack: FakeStack, client: httpx.AsyncClient
+) -> None:
+    case = _case("status_question")
+    not_found = _with_script(
+        case,
+        [
+            {"tool_calls": [{"name": "get_ticket", "args": {"ticket_id": "INC-0070"}}]},
+            {"content": "INC-0007 is in progress; the battery was ordered."},
+        ],
+    )
+    result = await run_case(not_found, stack, client, run=1)
+    assert not result.passed
+    assert [r.split(":")[0] for r in result.reasons] == ["turn 1 tool_calls_include"]
+
+
 def _texts(root: Path) -> dict[str, str]:
     files = [*root.glob("traces/*.jsonl"), *root.glob("logs/*.log")]
     return {path.name: path.read_text(encoding="utf-8", errors="replace") for path in files}
