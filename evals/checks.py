@@ -25,7 +25,7 @@ from evals.traces import (
     tool_result,
 )
 from helpdesk.shared.api import ChatStatus
-from helpdesk.shared.errors import parse_tool_error
+from helpdesk.shared.errors import ErrorCode, parse_tool_error
 from helpdesk.shared.tools import WRITE_TOOLS, ToolName
 
 type CaseCheck = Callable[[CaseExpect, CaseEvidence], list[str]]
@@ -244,14 +244,35 @@ def tool_error_codes_include(expect: CaseExpect, evidence: CaseEvidence) -> list
     return []
 
 
+def _is_not_found(text: str) -> bool:
+    parsed = parse_tool_error(text)
+    return parsed is not None and parsed.code is ErrorCode.NOT_FOUND
+
+
 def known_ticket_ids(evidence: CaseEvidence) -> set[str]:
-    """Ids the agent may mention: from the user, or from a tool result it was given."""
+    """Ids the agent may mention: from the user, or from a tool result it was given.
+
+    A NOT_FOUND error names the id the model asked for, which proves only that the ticket
+    does not exist, so its text never makes an id known. The user's own id stays known
+    through the user's message.
+    """
     sources: list[str] = list(evidence.user_messages())
     for run in evidence.turns:
-        sources += [tool_result(span) for span in run.trace.tool_spans]
-        sources += [text for span in run.trace.llm_spans for text in llm_tool_results(span)]
+        sources += [
+            tool_result(span)
+            for span in run.trace.tool_spans
+            if tool_error_code(span) != ErrorCode.NOT_FOUND.value
+        ]
+        sources += [
+            text
+            for span in run.trace.llm_spans
+            for text in llm_tool_results(span)
+            if not _is_not_found(text)
+        ]
         for call in run.response.tool_calls:
-            sources += [call.result_summary, call.error or ""]
+            if call.error is None or not _is_not_found(call.error):
+                # On an error the summary is the error text, so it goes with it.
+                sources += [call.result_summary, call.error or ""]
     return {match for text in sources for match in TICKET_ID_RE.findall(text)}
 
 

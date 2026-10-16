@@ -294,6 +294,34 @@ def test_no_invented_ticket_ids() -> None:
     assert "INC-0042" in failures[0]
 
 
+def test_ids_seen_only_in_a_not_found_error_are_not_known() -> None:
+    # The model asked for INC-0998 on its own; the error names it but proves nothing exists.
+    expect = CaseExpect(no_invented_ticket_ids=True)
+    error = format_tool_error(
+        ErrorCode.NOT_FOUND, "get_ticket failed: ticket INC-0998 does not exist"
+    )
+    reply = response(
+        reply="INC-0998 is in progress.",
+        tool_calls=[tool_call("get_ticket", error=error, result=error)],
+    )
+    spans = [
+        tool_span("get_ticket", result=error, error_code="NOT_FOUND"),
+        llm_span([("user", "Check INC-0999"), ("tool", error)]),
+    ]
+    run = turn_run(reply, spans, message="Check INC-0999")
+    assert checks.known_ticket_ids(evidence([run])) == {"INC-0999"}
+    failures = checks.no_invented_ticket_ids(expect, evidence([run]))
+    assert failures
+    assert "INC-0998" in failures[0]
+
+
+def test_ids_in_other_tool_errors_stay_known() -> None:
+    # A CONFLICT on a closed ticket proves the ticket exists.
+    error = format_tool_error(ErrorCode.CONFLICT, "add_comment failed: ticket INC-0003 is closed")
+    run = turn_run(response(tool_calls=[tool_call("add_comment", error=error, result=error)]))
+    assert checks.known_ticket_ids(evidence([run])) == {"INC-0003"}
+
+
 def test_final_status() -> None:
     expect = CaseExpect(final_status=ChatStatus.OK)
     first = turn_run(response(pending_action=pending()), index=1)
