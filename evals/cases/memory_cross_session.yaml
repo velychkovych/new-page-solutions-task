@@ -19,10 +19,13 @@ turns:
       status: awaiting_approval
       llm_input_contains: ["team: finance"]
 expect:
+  # Only the search: the write is never approved, so it has no mcp.tool span.
+  tools_called_in_order_contains: [search_tickets]
   proposed_tool: create_ticket
   proposed_text_contains: [finance]
   max_proposals: 1
   writes_executed: 0
+  no_invented_ticket_ids: true
   facts: {bob: {team: finance}}
 judge:
   - name: ticket_mentions_team

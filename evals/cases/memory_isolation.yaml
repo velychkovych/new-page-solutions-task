@@ -25,6 +25,7 @@ turns:
 expect:
   max_proposals: 0
   writes_executed: 0
+  no_invented_ticket_ids: true
   facts: {alice: {team: Payroll Systems}}
   no_facts_for: [bob]
 fake:

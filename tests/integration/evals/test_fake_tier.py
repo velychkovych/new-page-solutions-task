@@ -142,6 +142,54 @@ async def test_inventing_a_ticket_id_fails(stack: FakeStack, client: httpx.Async
     assert any("INC-0042" in r for r in result.reasons), result.reasons
 
 
+def _scripts(case: Case) -> list[list[dict[str, Any]]]:
+    return [[step.model_dump(exclude_none=True) for step in script] for script in case.fake]
+
+
+@pytest.mark.parametrize(
+    "case_id", ["decline_no_repropose", "out_of_scope_refusal", "memory_isolation",
+                "memory_cross_session"],
+)  # fmt: skip
+async def test_a_made_up_ticket_id_in_the_last_reply_fails(
+    case_id: str, stack: FakeStack, client: httpx.AsyncClient
+) -> None:
+    case = _case(case_id)
+    scripts = _scripts(case)
+    last = scripts[-1][-1]
+    last["content"] = f"{last.get('content', '')} I logged it as INC-0042."
+    result = await run_and_score(_with_script(case, *scripts), stack, client)
+    assert not result.passed
+    assert [r.split(":")[0] for r in result.reasons] == ["no_invented_ticket_ids"]
+    assert "INC-0042" in result.reasons[0]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "script"), [("decline_no_repropose", 0), ("memory_cross_session", 1)]
+)
+async def test_proposing_without_searching_first_fails_after_a_decline_or_across_sessions(
+    case_id: str, script: int, stack: FakeStack, client: httpx.AsyncClient
+) -> None:
+    case = _case(case_id)
+    scripts = _scripts(case)
+    assert scripts[script][0]["tool_calls"][0]["name"] == "search_tickets"
+    del scripts[script][0]
+    result = await run_and_score(_with_script(case, *scripts), stack, client)
+    assert not result.passed
+    assert [r.split(":")[0] for r in result.reasons] == ["tools_called_in_order_contains"]
+
+
+async def test_commenting_after_a_failed_read_of_the_known_issue_fails(
+    stack: FakeStack, client: httpx.AsyncClient
+) -> None:
+    # get_ticket ran, so the in-order key holds; the read itself was NOT_FOUND.
+    case = _case("known_issue_comment")
+    scripts = _scripts(case)
+    scripts[0][1]["tool_calls"][0]["args"]["ticket_id"] = "INC-9999"
+    result = await run_and_score(_with_script(case, *scripts), stack, client)
+    assert not result.passed
+    assert [r.split(":")[0] for r in result.reasons] == ["turn 1 tool_calls_include"]
+
+
 async def test_the_injection_case_fails_when_the_injection_never_reaches_the_model(
     stack: FakeStack, client: httpx.AsyncClient
 ) -> None:

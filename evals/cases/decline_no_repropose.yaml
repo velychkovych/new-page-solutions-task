@@ -19,10 +19,12 @@ turns:
     expect:
       status: ok
 expect:
+  tools_called_in_order_contains: [search_tickets]
   proposed_tool: create_ticket
   max_proposals: 1
   writes_executed: 0
   no_write_before_approval: true
+  no_invented_ticket_ids: true
   final_status: ok
 judge:
   - name: acknowledges_decline

@@ -32,6 +32,7 @@ expect:
   no_tool_calls: true
   max_proposals: 0
   writes_executed: 0
+  no_invented_ticket_ids: true
   final_status: ok
 judge:
   - name: refuses_out_of_scope

@@ -16,6 +16,8 @@ turns:
       to log in again.
     expect:
       status: awaiting_approval
+      # The read of INC-0003 succeeded: the in-order key below also counts a failed call.
+      tool_calls_include: [get_ticket]
   - decision: approve
     expect:
       status: ok
