@@ -29,6 +29,10 @@ pytestmark = pytest.mark.e2e
 # Seeded, so the 500/503 choices repeat run to run.
 ALL_FAIL = {"enabled": True, "error_rate": 1.0, "seed": 7}
 FAIL_AFTER_COMMIT = {"enabled": True, "fail_after_commit_rate": 1.0, "seed": 7}
+# Mixed outcomes, unlike ALL_FAIL (which can never commit, so "no duplicate" cannot fail
+# there). Seed 8 gives the write: commit with the response lost, then a 500, then a replay.
+# A retry with a fresh key would create a second ticket here.
+MIXED = {"enabled": True, "error_rate": 0.4, "fail_after_commit_rate": 0.6, "seed": 8}
 WRITE_FAILED = re.compile(r"^ERROR (UPSTREAM_UNAVAILABLE|TIMEOUT): ")
 TICKET_ID = re.compile(r"INC-\d{4}")
 
@@ -104,3 +108,24 @@ def test_a_lost_response_after_commit_still_writes_exactly_once(agent: Agent, mo
     ticket = created_ticket(mock)
     assert ticket["id"] in write.result_summary
     assert_exactly_one_write(mock)
+
+
+def test_a_lost_commit_then_an_error_then_a_replay_writes_exactly_once(
+    agent: Agent, mock: Mock
+) -> None:
+    pending = agent.propose()
+    mock.chaos(**MIXED)
+
+    approved = agent.chat(action_id=pending.action_id)
+
+    (write,) = approved.tool_calls
+    assert write.name == "create_ticket"
+    assert write.error is None, write.error
+    assert approved.status.value == "ok", approved
+    assert approved.reply == EMPTY_AFTER_WRITE_REPLY
+    # Committed (response lost), failed by chaos before the handler, then replayed.
+    assert _tool_span(approved.trace_id)[attrs.TOOL_ATTEMPTS] == 3
+    mock.chaos_off()
+    assert_exactly_one_write(mock)
+    ticket = created_ticket(mock)
+    assert ticket["id"] in write.result_summary
