@@ -190,6 +190,10 @@ def render_markdown(report: Report) -> str:
         "",
         "## Tokens (from the LLM spans)",
         "",
+        "Input counts every prompt token, the cached ones included (OpenInference's",
+        "`llm.token_count.prompt`); cache read and cache write are the parts of it served",
+        "from or written to the prompt cache.",
+        "",
         "| Input | Output | Cache read | Cache write | Input + output |",
         "|---|---|---|---|---|",
         f"| {tokens.input} | {tokens.output} | {tokens.cache_read} | {tokens.cache_write}"

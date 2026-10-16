@@ -159,8 +159,8 @@ def summary_lines(report: Report, out: Path) -> list[str]:
         f"Pass rate: {overall.passes}/{overall.runs} ({overall.pass_rate * 100:.0f}%)",
         f"Model: {', '.join(report.metadata.models) or '-'}"
         f" (provider: {', '.join(report.metadata.providers) or '-'})",
-        f"Tokens: {tokens.total} (input {tokens.input}, output {tokens.output},"
-        f" cache read {tokens.cache_read}, cache write {tokens.cache_write})",
+        f"Tokens: {tokens.total} (input {tokens.input}, output {tokens.output};"
+        f" of the input, cache read {tokens.cache_read}, cache write {tokens.cache_write})",
         f"Results: {out}",
     ]
 
