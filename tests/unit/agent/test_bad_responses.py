@@ -23,7 +23,11 @@ from helpdesk.agent import final_reply, turn_errors
 from helpdesk.agent.history import model_messages
 from helpdesk.agent.model_calls import UNNAMED_TOOL
 from helpdesk.agent.run_config import build_run_config
-from helpdesk.agent.tool_errors import UNCONFIRMED_WRITE_NEXT_STEP, rejected_batch_error
+from helpdesk.agent.tool_errors import (
+    ONE_CHANGE_AT_A_TIME_WHAT,
+    UNCONFIRMED_WRITE_NEXT_STEP,
+    rejected_batch_error,
+)
 from helpdesk.agent.tool_messages import USER_DECLINED
 from helpdesk.agent.tool_provider import ToolResult
 from helpdesk.shared.api import ChatResponse, ChatStatus, ToolCallRecord
@@ -274,10 +278,70 @@ async def test_a_write_next_to_an_unparseable_call_is_rejected_too(
     _, reply = await _turn(make_client, provider, model)
 
     write, unparseable = _tool_messages(model.calls[1])
-    assert _error(write).what == "propose one change at a time, after your reads"
-    assert _error(unparseable).code is ErrorCode.INVALID_ARGUMENT
-    assert "JSON" in _error(unparseable).what
+    # CONTRACTS §5.3: every call of a rejected batch gets the batch text; the broken
+    # call's own defect is named in its next step.
+    for message in (write, unparseable):
+        error = _error(message)
+        assert error.code is ErrorCode.INVALID_ARGUMENT
+        assert error.what == ONE_CHANGE_AT_A_TIME_WHAT
+        assert "the write create_ticket with search_tickets" in error.next_step
+    assert "JSON" not in _error(write).next_step
+    assert "search_tickets call are not a valid JSON object" in _error(unparseable).next_step
     assert [r.name for r in reply.tool_calls] == ["create_ticket", "search_tickets"]
+    assert reply.pending_action is None
+    assert_well_formed(model.calls[1])
+    assert provider.calls == []
+
+
+@pytest.mark.parametrize(
+    ("message", "defects"),
+    [
+        pytest.param(
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "create_ticket", "args": CREATE_ARGS, "id": "w1"},
+                    {"name": "add_comment", "args": COMMENT_ARGS, "id": "w2"},
+                ],
+                response_metadata={"stop_reason": "max_tokens"},
+            ),
+            ["cut off", "cut off"],
+            id="truncated-two-writes",
+        ),
+        pytest.param(
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "create_ticket", "args": CREATE_ARGS, "id": "w1"},
+                    {"name": "search_tickets", "args": {"query": "vpn"}, "id": None},
+                ],
+            ),
+            [None, "search_tickets call had no tool call id"],
+            id="missing-id-next-to-a-write",
+        ),
+    ],
+)
+async def test_every_call_of_a_rejected_batch_gets_the_batch_text(
+    *, make_client, provider, fake_model, make_ai, message, defects
+):
+    model = fake_model(responses=[message, make_ai("One change at a time, then.")])
+
+    _, reply = await _turn(make_client, provider, model)
+
+    messages = _tool_messages(model.calls[1])
+    assert len(messages) == len(defects)
+    for tool_message, defect in zip(messages, defects, strict=True):
+        error = _error(tool_message)
+        assert error.code is ErrorCode.INVALID_ARGUMENT
+        assert error.what == ONE_CHANGE_AT_A_TIME_WHAT
+        if defect is None:
+            assert "cut off" not in error.next_step
+            assert "no tool call id" not in error.next_step
+        else:
+            assert defect in error.next_step
+    assert len(reply.tool_calls) == len(defects)
+    for record in reply.tool_calls:
+        _rejected_record(record, record.name, ErrorCode.INVALID_ARGUMENT)
     assert reply.pending_action is None
     assert_well_formed(model.calls[1])
     assert provider.calls == []

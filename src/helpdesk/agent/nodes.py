@@ -47,10 +47,13 @@ from helpdesk.agent.tool_errors import (
     REMEMBER_FACT_NEXT_STEP,
     internal_failure,
     invalid_args_error,
+    missing_id_defect,
     missing_id_error,
     rejected_batch_error,
+    truncated_call_defect,
     truncated_call_error,
     unknown_tool_error,
+    unparseable_args_defect,
     unparseable_args_error,
 )
 from helpdesk.agent.tool_messages import declined_message, elapsed_ms, tool_message
@@ -86,21 +89,35 @@ def _parse_result(text: str) -> JsonValue:
     return parsed
 
 
+def _defect(call: ModelCall, message: AIMessage) -> str | None:
+    """What is wrong with the call itself, most basic cause first: a cut-off reply explains
+    its unparseable calls."""
+    if is_truncated(message):
+        return truncated_call_defect(call.name)
+    if call.invalid == MISSING_ID:
+        return missing_id_defect(call.name)
+    if call.invalid is not None:
+        return unparseable_args_defect(call.name)
+    return None
+
+
 def _rejected(call: ModelCall, message: AIMessage, calls: Sequence[ModelCall]) -> str | None:
     """The error for a call that must not run, or None when it may.
 
-    Most basic cause first: a cut-off reply explains its unparseable calls, and a call
-    that could never run is not also blamed on the batch it came in.
+    A rejected batch gives every call the batch text of CONTRACTS §5.3, with the call's own
+    defect in its next step. Outside a batch, a broken call gets an error for its defect.
     """
+    if classify_tool_calls(calls) is ToolCallBatch.REJECTED:
+        return rejected_batch_error([c.name for c in calls], _defect(call, message))
     if is_truncated(message):
         return truncated_call_error(call.name)
     if call.invalid == MISSING_ID:
         return missing_id_error(call.name)
     if call.invalid is not None:
         return unparseable_args_error(call.name)
-    if classify_tool_calls(calls) is ToolCallBatch.REJECTED or call.name in WRITE_TOOL_NAMES:
-        # A write reaches this node only next to other calls; it never runs here.
-        return rejected_batch_error([c.name for c in calls])
+    if call.name in WRITE_TOOL_NAMES:
+        # A lone, whole write goes to propose; it never runs here.
+        return rejected_batch_error([call.name])
     return None
 
 

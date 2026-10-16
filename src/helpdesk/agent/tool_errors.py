@@ -40,8 +40,13 @@ def unknown_tool_error(name: str, available: Sequence[str]) -> str:
     )
 
 
-def rejected_batch_error(names: Sequence[str]) -> str:
-    """For each call of a reply that held more than one write, or a write next to other calls."""
+def rejected_batch_error(names: Sequence[str], defect: str | None = None) -> str:
+    """For each call of a reply that held more than one write, or a write next to other calls.
+
+    CONTRACTS §5.3 fixes the text for every call of such a reply, broken ones included; a
+    call's own `defect` (cut off, no id, unparseable JSON) is added to its next step, so the
+    model still learns what to fix in it.
+    """
     writes = [name for name in names if name in WRITE_TOOL_NAMES]
     others = [name for name in names if name not in WRITE_TOOL_NAMES]
     combined = (
@@ -49,12 +54,25 @@ def rejected_batch_error(names: Sequence[str]) -> str:
     )
     if others:
         combined += f" with {_names(others)}"
+    also = f", and {defect}" if defect is not None else ""
     return format_tool_error(
         ErrorCode.INVALID_ARGUMENT,
         ONE_CHANGE_AT_A_TIME_WHAT,
-        f"None of these calls ran, because one message combined {combined}; make your read "
-        "calls first, then send the single write as the only call in a message of its own",
+        f"None of these calls ran, because one message combined {combined}{also}; make your "
+        "read calls first, then send the single write as the only call in a message of its own",
     )
+
+
+def truncated_call_defect(name: str) -> str:
+    return f"the reply was cut off at the output token limit, so the {name} call may be incomplete"
+
+
+def missing_id_defect(name: str) -> str:
+    return f"the {name} call had no tool call id"
+
+
+def unparseable_args_defect(name: str) -> str:
+    return f"the arguments of the {name} call are not a valid JSON object"
 
 
 def unparseable_args_error(name: str) -> str:
