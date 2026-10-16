@@ -4,6 +4,11 @@ id: chaos_moderate_completes
 title: Moderate chaos -> the task completes, retries visible in the trace, one write
 plan_case: 11
 user_id: carol
+scenario: >-
+  carol reports a USB headset cutting out while the ticketing API fails some requests
+  (moderate chaos).
+expected_outcome: >-
+  Failed calls are retried, the proposal is approved, and exactly one ticket is created.
 setup: {chaos: moderate}
 turns:
   - message: >-

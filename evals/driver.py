@@ -1,5 +1,5 @@
-"""Run one case against a stack: set it up, send its turns over HTTP, collect the evidence,
-check it.
+"""Run one case against a stack: set it up, send its turns over HTTP, collect the evidence.
+The checks run afterwards, as DeepEval metrics (evals.scoring).
 
 Between cases: chaos off, mock reset, the facts of every user the case touches cleared,
 the case's facts set, then its chaos. Every run gets fresh session ids. Chaos is turned
@@ -15,10 +15,9 @@ from pydantic import ValidationError
 
 from evals.cases import Case, DecisionTurn, MessageTurn
 from evals.chaos_profiles import CHAOS_OFF, resolve_chaos
-from evals.checks import evaluate
 from evals.evidence import CaseEvidence, TurnRun
 from evals.facts_command import FactsCommand
-from evals.results import CaseRunResult, TurnResult
+from evals.results import TurnResult
 from evals.stack import Stack, StackError
 from evals.traces import TRACE_WAIT_S, TokenUsage, TraceIncompleteError, wait_for_trace
 from helpdesk.shared.api import ChatRequest, ChatResponse, Decision, PendingActionView
@@ -82,6 +81,23 @@ async def send(
         raise CaseFailedError(
             f"turn {index}: not a ChatResponse ({exc.error_count()} errors)"
         ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedRun:
+    """One run of a case, before scoring: its evidence, or why it has none."""
+
+    case: Case
+    run: int
+    turns: list[TurnResult]
+    # None when the run ended early (`error` says why): nothing is left to check, and an
+    # incomplete trace must never make "no write span" look like a pass.
+    evidence: CaseEvidence | None
+    error: str | None
+    duration_s: float
+    tokens: TokenUsage
+    models: list[str]
+    providers: list[str]
 
 
 @dataclass
@@ -173,10 +189,12 @@ async def run_case(
     *,
     run: int,
     trace_wait_s: float = TRACE_WAIT_S,
-) -> CaseRunResult:
+) -> CollectedRun:
     """One run of `case`. Raises StackError when the stack itself fails."""
     started = time.perf_counter()
     progress = _Progress(turns=[], results=[])
+    evidence: CaseEvidence | None = None
+    error: str | None = None
     try:
         await prepare(case, stack)
         await _run_turns(case, stack, client, progress, trace_wait_s)
@@ -184,19 +202,16 @@ async def run_case(
         writes = await stack.writes()
         readers = sorted(set(case.expect.facts) | set(case.expect.no_facts_for))
         facts = (await stack.facts(FactsCommand(read=readers))).facts if readers else {}
-        reasons = evaluate(
-            CaseEvidence(case=case, turns=progress.turns, writes=writes, facts=facts)
-        )
+        evidence = CaseEvidence(case=case, turns=progress.turns, writes=writes, facts=facts)
     except (CaseFailedError, TraceIncompleteError) as exc:
-        reasons = [str(exc)]
+        error = str(exc)
     traces = [turn.trace for turn in progress.turns]
-    return CaseRunResult(
-        case_id=case.id,
-        plan_case=case.plan_case,
+    return CollectedRun(
+        case=case,
         run=run,
-        passed=not reasons,
-        reasons=reasons,
         turns=progress.results,
+        evidence=evidence,
+        error=error,
         duration_s=round(time.perf_counter() - started, 2),
         tokens=sum((result.tokens for result in progress.results), TokenUsage()),
         models=sorted({model for trace in traces for model in trace.models}),

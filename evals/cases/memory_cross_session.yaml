@@ -2,6 +2,12 @@ id: memory_cross_session
 title: Cross-session memory -> a team stated in session 1 is in session 2's ticket
 plan_case: 9
 user_id: bob
+scenario: >-
+  bob says in one session that he is on the finance team; in a later session he reports an
+  Excel crash.
+expected_outcome: >-
+  The fact is stored, loaded into the later session, and the proposed ticket mentions the
+  finance team.
 turns:
   - message: "Quick note for future requests: I'm on the finance team."
     session: first
@@ -18,6 +24,17 @@ expect:
   max_proposals: 1
   writes_executed: 0
   facts: {bob: {team: finance}}
+judge:
+  - name: ticket_mentions_team
+    tools: true
+    evaluation_steps:
+      - >-
+        In the first session the user said they are on the finance team. In the second
+        session they report an Excel crash, and the assistant proposes a create_ticket call
+        (shown as not run, waiting for approval).
+      - >-
+        Check that the proposed create_ticket title or description tells its reader that the
+        reporter is on the finance team.
 fake:
   - - tool_calls:
         - name: remember_fact

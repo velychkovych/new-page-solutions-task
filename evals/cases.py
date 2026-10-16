@@ -3,6 +3,12 @@
 A case names the PLAN "Minimum cases" it covers (`plan_case`), the user and the stack
 setup (chaos, stored facts), the turns to send, and what must hold afterwards. `fake` is
 the deterministic tier's model script: one script per turn that reaches the model.
+
+The case files are the source of truth; evals.dataset turns each into a DeepEval golden.
+`expect` holds the deterministic checks (evals.checks, one DeepEval metric per key).
+`judge` holds the LLM-as-judge metrics, which grade only what the reply means; whether a
+write, an approval, a retry or a memory leak happened is never theirs to decide.
+`fake_judge` scripts the judge's verdicts for the deterministic tier (default: pass).
 """
 
 import re
@@ -39,6 +45,7 @@ CASES_DIR = Path(__file__).resolve().with_name("cases")
 DEFAULT_SESSION = "main"
 
 CaseId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,32}$")]
+MetricName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,48}$")]
 SessionLabel = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,12}$")]
 PlanCase = Annotated[int, Field(ge=1, le=13)]
 
@@ -175,6 +182,20 @@ class CaseExpect(_Expect):
     no_facts_for: list[UserId] = []
 
 
+class JudgeSpec(_Model):
+    """One LLM-as-judge metric (DeepEval ConversationalGEval, strict: pass or fail)."""
+
+    name: MetricName
+    # Explicit steps, so the judge makes one call per metric instead of first writing
+    # its own steps from a criteria text.
+    evaluation_steps: Annotated[list[NonEmptyText], Field(min_length=1)]
+    # Show the judge the tool calls (arguments and results), not only the messages.
+    tools: bool = False
+
+
+type FakeVerdict = Literal["pass", "fail"]
+
+
 class CaseSetup(_Model):
     chaos: Annotated[ChaosSetting, BeforeValidator(_yaml_off)] = ChaosProfile.OFF
     # {user_id: {fact_key: value}}; the PLAN shorthand {fact_key: value} means the case user
@@ -187,9 +208,15 @@ class Case(_Model):
     title: NonEmptyText
     plan_case: Annotated[list[PlanCase], ListOf, Field(min_length=1)]
     user_id: UserId
+    # The DeepEval golden's scenario and expected outcome (default: the title).
+    scenario: NonEmptyText | None = None
+    expected_outcome: NonEmptyText | None = None
     setup: CaseSetup = CaseSetup()
     turns: Annotated[list[Turn], Field(min_length=1)]
     expect: CaseExpect = CaseExpect()
+    judge: list[JudgeSpec] = []
+    # The fake tier's judge verdict per judge metric; a metric left out passes.
+    fake_judge: dict[MetricName, FakeVerdict] = {}
     # One model script per turn that reaches the model (see `reaches_model`). A decision
     # adds no user message, so it continues the script of the message before it.
     fake: list[Annotated[list[ScriptedMessage], Field(min_length=1)]]
@@ -230,7 +257,15 @@ class Case(_Model):
                     f" {turn.session!r} of {thread[0]} before it"
                 )
             started.add(thread)
+        names = [spec.name for spec in self.judge]
+        if len(set(names)) != len(names):
+            raise ValueError(f"judge metric names must be unique: {names}")
+        if unknown := sorted(set(self.fake_judge) - set(names)):
+            raise ValueError(f"fake_judge names no judge metric of this case: {unknown}")
         return self
+
+    def fake_verdict(self, metric: str) -> FakeVerdict:
+        return self.fake_judge.get(metric, "pass")
 
     def turn_user(self, turn: MessageTurn | DecisionTurn) -> str:
         return turn.user_id or self.user_id

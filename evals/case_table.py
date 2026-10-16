@@ -1,4 +1,7 @@
-"""`python -m evals.run --list`: the cases as a markdown table (pasted into the README)."""
+"""`python -m evals.run --list`: the cases as a markdown table (pasted into the README).
+
+"Key expectations" lists the deterministic checks, then the judge metrics (`judge: name`).
+"""
 
 from collections.abc import Sequence
 
@@ -43,6 +46,7 @@ def render_case_table(cases: Sequence[Case]) -> str:
             for i, turn in enumerate(case.turns)
             for key in turn.expect.set_keys()
         ]
+        keys += [f"judge: {spec.name}" for spec in case.judge]
         chaos = chaos_label(case)
         lines.append(
             f"| `{case.id}` | {', '.join(map(str, case.plan_case))} | {md_cell(case.title)}{chaos}"

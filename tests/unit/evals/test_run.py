@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.unit.evals.conftest import make_case
+from tests.unit.evals.conftest import collected, make_case
 
 from evals import run as run_module
+from evals.judges import scripted_judges
 from evals.report import Report, RunMetadata, build_report
-from evals.results import CaseRunResult
+from evals.results import CaseRunResult, Outcome
 from evals.run import (
     EXIT_FAILED,
     EXIT_INFRA,
@@ -24,6 +25,7 @@ from evals.run import (
 )
 from evals.stack import StackError, Tier, mask_secrets
 from evals.traces import TokenUsage
+from helpdesk.shared.settings import MissingSecretError
 
 
 def test_defaults() -> None:
@@ -65,7 +67,7 @@ def test_an_unknown_case_id_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert "unknown case id" in capsys.readouterr().err
 
 
-def _report(passed: bool) -> Report:
+def _report(outcome: Outcome) -> Report:
     metadata = RunMetadata(
         started_at="s",
         finished_at="f",
@@ -83,35 +85,72 @@ def _report(passed: bool) -> Report:
         case_id="unit_case",
         plan_case=[1],
         run=1,
-        passed=passed,
-        reasons=[] if passed else ["x"],
+        outcome=outcome,
+        reasons=[] if outcome is Outcome.PASSED else ["x"],
         turns=[],
         duration_s=0.1,
         tokens=TokenUsage(input=7, output=3),
         models=[],
         providers=[],
+        judge_tokens=TokenUsage(input=20, output=2),
     )
     return build_report(metadata, [make_case()], [result])
 
 
-@pytest.mark.parametrize(("passed", "code"), [(True, EXIT_OK), (False, EXIT_FAILED)])
+@pytest.mark.parametrize(
+    "expected",
+    [
+        (Outcome.PASSED, EXIT_OK, "Pass rate: 1/1 (100%)"),
+        (Outcome.FAILED, EXIT_FAILED, "Pass rate: 0/1 (0%)"),
+        # Not exercised is not a failure, and the pass rate says so.
+        (Outcome.NOT_EXERCISED, EXIT_OK, "Pass rate: 0/0 (n/a), 1 not exercised"),
+    ],
+)
 def test_exit_code_follows_the_runs_and_results_are_written_either_way(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    passed: bool,
-    code: int,
+    expected: tuple[Outcome, int, str],
 ) -> None:
+    outcome, code, rate = expected
+
     async def fake_evaluate(*_: Any, **__: Any) -> Report:
-        return _report(passed)
+        return _report(outcome)
 
     monkeypatch.setattr(run_module, "evaluate_cases", fake_evaluate)
     assert main(["--fake", "--case", "status_question", "--out", str(tmp_path)]) == code
     assert (tmp_path / "latest.json").exists()
     assert (tmp_path / "latest.md").exists()
     out = capsys.readouterr().out
+    assert rate in out
     assert "Tokens: 10 (input 7, output 3" in out
+    assert "Judge tokens: 22 (input 20, output 2)" in out
     assert "Model: - (provider: scriptedchatmodel)" in out
+
+
+def test_the_live_tier_needs_the_judge_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_key(*_: Any) -> Any:
+        raise MissingSecretError("ANTHROPIC_API_KEY")
+
+    async def must_not_run(*_: Any, **__: Any) -> Report:
+        raise AssertionError("no case may run without a judge")
+
+    monkeypatch.setattr(run_module, "model_judges", no_key)
+    monkeypatch.setattr(run_module, "Settings", lambda: None)
+    monkeypatch.setattr(run_module, "evaluate_cases", must_not_run)
+    assert main(["--case", "status_question", "--out", str(tmp_path)]) == EXIT_INFRA
+    assert (
+        "the judge model cannot be built: ANTHROPIC_API_KEY is not set" in capsys.readouterr().err
+    )
+
+
+def test_judges_per_tier() -> None:
+    judged = [c for c in run_module.load_cases() if c.judge]
+    unjudged = [c for c in run_module.load_cases() if not c.judge]
+    assert run_module.judges_for(True, judged).model == "scripted-judge"
+    assert run_module.judges_for(False, unjudged).model == "-"
 
 
 def test_an_infrastructure_error_exits_2_and_writes_nothing(
@@ -179,8 +218,8 @@ async def test_the_git_state_is_taken_before_the_stack_starts(
         order.append("stack")
         yield None
 
-    async def no_cases(*_: Any) -> list[CaseRunResult]:
-        return []
+    async def no_cases(*_: Any) -> None:
+        return None
 
     monkeypatch.setattr(run_module, "git_state", fake_git_state)
     monkeypatch.setattr(run_module, "open_stack", fake_open_stack)
@@ -193,24 +232,10 @@ async def test_the_git_state_is_taken_before_the_stack_starts(
         chaos_only=False,
         case_filter=[],
         progress=lambda _: None,
+        judges=scripted_judges(),
     )
     assert order == ["git", "stack"]
     assert report.metadata.git_sha == "abc"
-
-
-def _result(case_id: str = "unit_case", run: int = 1) -> CaseRunResult:
-    return CaseRunResult(
-        case_id=case_id,
-        plan_case=[1],
-        run=run,
-        passed=True,
-        reasons=[],
-        turns=[],
-        duration_s=0.1,
-        tokens=TokenUsage(),
-        models=[],
-        providers=[],
-    )
 
 
 async def _evaluate_breaking_after(monkeypatch: pytest.MonkeyPatch, finished: int) -> Report:
@@ -222,8 +247,8 @@ async def _evaluate_breaking_after(monkeypatch: pytest.MonkeyPatch, finished: in
         yield None
 
     async def breaks(*args: Any) -> None:
-        results: list[CaseRunResult] = args[-1]
-        results += [_result(run=i) for i in range(1, finished + 1)]
+        runs: list[Any] = args[-1]
+        runs += [collected(None, error="x", run=i) for i in range(1, finished + 1)]
         raise StackError("mock GET /admin/writes returned 502")
 
     monkeypatch.setattr(run_module, "git_state", fake_git_state)
@@ -237,6 +262,7 @@ async def _evaluate_breaking_after(monkeypatch: pytest.MonkeyPatch, finished: in
         chaos_only=False,
         case_filter=[],
         progress=lambda _: None,
+        judges=scripted_judges(),
     )
 
 
@@ -261,7 +287,7 @@ def test_an_aborted_run_writes_its_results_marked_aborted_and_exits_2(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     aborted = "infrastructure error after 1 of 3 runs: agent-eval is not healthy"
-    report = _report(True)
+    report = _report(Outcome.PASSED)
     report = report.model_copy(
         update={"metadata": report.metadata.model_copy(update={"aborted": aborted})}
     )

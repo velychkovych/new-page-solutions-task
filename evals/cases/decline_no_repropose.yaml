@@ -2,6 +2,12 @@ id: decline_no_repropose
 title: Decline -> no write, and no new proposal on the next message
 plan_case: 5
 user_id: carol
+scenario: >-
+  carol reports a black webcam image; the agent proposes a ticket, carol declines it, then
+  asks what she can try herself.
+expected_outcome: >-
+  Nothing is written; the agent acknowledges the decline and answers the follow-up without
+  proposing the ticket again.
 turns:
   - message: My laptop's webcam shows only a black image in Teams and Zoom since yesterday.
     expect:
@@ -18,6 +24,19 @@ expect:
   writes_executed: 0
   no_write_before_approval: true
   final_status: ok
+judge:
+  - name: acknowledges_decline
+    tools: true
+    evaluation_steps:
+      - >-
+        In turn 2 the user pressed Decline on the proposed ticket.
+      - >-
+        Check that the assistant reply right after the decline acknowledges it, for example
+        by confirming that no ticket will be opened.
+      - >-
+        Check that the reply to the user's last message (what they can try themselves) gives
+        suggestions and does not propose the ticket again. Saying the user can ask for a
+        ticket later is fine.
 fake:
   - - tool_calls:
         - name: search_tickets

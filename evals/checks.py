@@ -3,9 +3,10 @@
 Each returns the reasons it failed (empty when it holds), prefixed with its key. A check
 whose evidence is missing fails instead of passing: "no write span" proves nothing when no
 turn ever reached a proposal, and "the LLM input does not contain X" proves nothing
-without an LLM span.
+without an LLM span. evals.metrics runs each key as a DeepEval metric.
 """
 
+import json
 import re
 from collections.abc import Callable, Iterable
 
@@ -79,6 +80,27 @@ def no_tool_calls(expect: CaseExpect, evidence: CaseEvidence) -> list[str]:
     if listed or spans:
         return _fail("no_tool_calls", f"response tool_calls {listed}, mcp.tool spans {spans}")
     return []
+
+
+def first_search_had_more_pages(evidence: CaseEvidence) -> bool | None:
+    """Whether the first successful search_tickets result had a next page.
+
+    None when that is not known: no successful search, or a result cut short in the span
+    (the MCP server truncates long results), so a run is only reported "not exercised"
+    when the trace proves every match was on the first page.
+    """
+    for run in evidence.turns:
+        for span in run.trace.tool_spans:
+            if tool_name(span) != ToolName.SEARCH_TICKETS or tool_error_code(span) is not None:
+                continue
+            try:
+                result = json.loads(tool_result(span))
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(result, dict) or "next_cursor" not in result:
+                return None
+            return result["next_cursor"] is not None
+    return None
 
 
 def cursor_followed(expect: CaseExpect, evidence: CaseEvidence) -> list[str]:
@@ -425,16 +447,3 @@ TURN_CHECKS: dict[str, TurnCheck] = {
     "llm_input_not_contains": llm_input_not_contains,
     "tool_calls_include": tool_calls_include,
 }
-
-
-def evaluate(evidence: CaseEvidence) -> list[str]:
-    """Every failed expectation of the case, turn checks first, in turn order."""
-    failures: list[str] = []
-    for run in evidence.turns:
-        expect = run.turn.expect
-        for key in expect.set_keys():
-            failures += TURN_CHECKS[key](expect, run)
-    case_expect = evidence.case.expect
-    for key in case_expect.set_keys():
-        failures += CASE_CHECKS[key](case_expect, evidence)
-    return failures

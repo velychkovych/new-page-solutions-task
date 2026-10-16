@@ -3,11 +3,16 @@
     python -m evals.run [--repeats N] [--chaos] [--model NAME] [--case ID ...] [--fake]
                         [--out DIR] [--list]
 
-Live tier (default): the compose service `agent-eval` with the real model; costs money.
-`--fake`: local processes with the scripted model, deterministic, no key needed; its
-results go to evals/results/fake/ and never replace the committed live results.
+Live tier (default): the compose service `agent-eval` with the real model, and the judge
+model (JUDGE_MODEL_*, read from .env through Settings) for the judge metrics; costs money.
+`--fake`: local processes with the scripted model and a scripted judge, deterministic, no
+key needed; its results go to evals/results/fake/ and never replace the committed live
+results.
 
-Exit status: 0 every run passed, 1 a run failed (results are written either way),
+The runs are collected first; then every run is scored through DeepEval (evals.scoring).
+
+Exit status: 0 no run failed (a run that was not exercised does not fail), 1 a run failed
+(results are written either way),
 2 an infrastructure error (stack not reachable, a command failed) or bad arguments. An
 infrastructure error after some runs finished still writes their results, marked aborted.
 143 terminated by SIGTERM, after cleaning up the stack; nothing is written.
@@ -25,16 +30,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+from pydantic import ValidationError
 
 from evals.case_table import render_case_table
 from evals.cases import CASES_DIR, Case, CaseFileError, load_cases, select_cases
 from evals.chaos_profiles import CHAOS_OFF
-from evals.driver import run_case
+from evals.dataset import build_dataset
+from evals.driver import CollectedRun, run_case
 from evals.fake_stack import FakeStack
+from evals.judges import Judges, model_judges, no_judges, scripted_judges
 from evals.live_stack import LiveStack
-from evals.report import Report, RunMetadata, build_report, write_report
-from evals.results import CaseRunResult
+from evals.report import Report, RunMetadata, build_report, rate_text, write_report
+from evals.results import CaseRunResult, Outcome
+from evals.scoring import score_runs
 from evals.stack import ROOT, Stack, StackError, Tier, run_command
+from helpdesk.agent.model import ModelConfigError
+from helpdesk.shared.settings import MissingSecretError, Settings
 
 LIVE_OUT = ROOT / "evals" / "results"
 FAKE_OUT = LIVE_OUT / "fake"
@@ -116,22 +127,30 @@ async def run_cases(
     cases: Sequence[Case],
     repeats: int,
     progress: Progress,
-    results: list[CaseRunResult],
+    collected: list[CollectedRun],
 ) -> None:
-    """Appends each run's result as it finishes, so the caller keeps them if one fails."""
+    """Appends each run as it finishes, so the caller keeps them if one fails."""
     total = len(cases) * repeats
     async with httpx.AsyncClient() as client:
         for case in cases:
             for run in range(1, repeats + 1):
                 result = await run_case(case, stack, client, run=run)
-                results.append(result)
-                verdict = "PASS" if result.passed else "FAIL"
+                collected.append(result)
+                ended = "collected" if result.error is None else f"ended early: {result.error}"
                 progress(
-                    f"[{len(results)}/{total}] {case.id} run {run}: {verdict}"
+                    f"[{len(collected)}/{total}] {case.id} run {run}: {ended}"
                     f" ({result.duration_s:.1f} s)"
                 )
-                for reason in result.reasons:
-                    progress(f"    - {reason}")
+
+
+VERDICTS = {Outcome.PASSED: "PASS", Outcome.FAILED: "FAIL", Outcome.NOT_EXERCISED: "NOT EXERCISED"}
+
+
+def report_verdicts(results: Sequence[CaseRunResult], progress: Progress) -> None:
+    for result in results:
+        progress(f"{result.case_id} run {result.run}: {VERDICTS[result.outcome]}")
+        for reason in result.reasons:
+            progress(f"    - {reason}")
 
 
 async def evaluate_cases(
@@ -143,20 +162,26 @@ async def evaluate_cases(
     chaos_only: bool,
     case_filter: Sequence[str],
     progress: Progress,
+    judges: Judges,
 ) -> Report:
     started = utc_now()
     # Before the run: what was checked out when it started is what it measured.
     sha, dirty = await git_state()
-    results: list[CaseRunResult] = []
+    collected: list[CollectedRun] = []
     aborted: str | None = None
     try:
         async with open_stack(fake, model) as stack:
-            await run_cases(stack, cases, repeats, progress, results)
+            await run_cases(stack, cases, repeats, progress, collected)
     except StackError as exc:
-        if not results:
+        if not collected:
             raise
         # Hours of finished runs are worth keeping; the report says they are not all.
-        aborted = f"infrastructure error after {len(results)} of {len(cases) * repeats} runs: {exc}"
+        aborted = (
+            f"infrastructure error after {len(collected)} of {len(cases) * repeats} runs: {exc}"
+        )
+    progress(f"Scoring {len(collected)} runs through DeepEval (judge: {judges.model})")
+    results = await score_runs(collected, build_dataset(cases), judges.judge_for)
+    report_verdicts(results, progress)
     metadata = RunMetadata(
         started_at=started,
         finished_at=utc_now(),
@@ -169,6 +194,9 @@ async def evaluate_cases(
         repeats=repeats,
         chaos_only=chaos_only,
         case_filter=list(case_filter),
+        judge_model=judges.model,
+        judge_provider=judges.provider,
+        judge_note=judges.note,
         aborted=aborted,
     )
     return build_report(metadata, cases, results)
@@ -196,15 +224,33 @@ async def cancel_on_sigterm[T](work: Awaitable[T]) -> T:
 
 def summary_lines(report: Report, out: Path) -> list[str]:
     tokens = report.tokens
-    overall = report.overall
+    judge = report.judge_tokens
+    meta = report.metadata
     return [
-        f"Pass rate: {overall.passes}/{overall.runs} ({overall.pass_rate * 100:.0f}%)",
-        f"Model: {', '.join(report.metadata.models) or '-'}"
-        f" (provider: {', '.join(report.metadata.providers) or '-'})",
+        f"Pass rate: {rate_text(report.overall)}",
+        f"Model: {', '.join(meta.models) or '-'} (provider: {', '.join(meta.providers) or '-'})",
+        f"Judge: {meta.judge_model} (provider: {meta.judge_provider}). {meta.judge_note}",
         f"Tokens: {tokens.total} (input {tokens.input}, output {tokens.output};"
         f" of the input, cache read {tokens.cache_read}, cache write {tokens.cache_write})",
+        f"Judge tokens: {judge.total} (input {judge.input}, output {judge.output})",
         f"Results: {out}",
     ]
+
+
+def needs_judge(cases: Sequence[Case]) -> bool:
+    return any(case.judge for case in cases)
+
+
+def judges_for(fake: bool, cases: Sequence[Case]) -> Judges:
+    """The fake tier's scripted judge, or the judge model from Settings (live tier).
+
+    Built before any case runs, so a missing judge key costs no agent tokens.
+    """
+    if fake:
+        return scripted_judges()
+    if not needs_judge(cases):
+        return no_judges()
+    return model_judges(Settings())
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -221,10 +267,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: no case matches the filters", file=sys.stderr)
         return EXIT_INFRA
     repeats = args.repeats or (FAKE_REPEATS if args.fake else LIVE_REPEATS)
-    return run_and_report(args, cases, repeats)
+    try:
+        judges = judges_for(args.fake, cases)
+    except (MissingSecretError, ModelConfigError, ValidationError) as exc:
+        print(f"error: the judge model cannot be built: {exc}", file=sys.stderr)
+        return EXIT_INFRA
+    return run_and_report(args, cases, repeats, judges)
 
 
-def run_and_report(args: argparse.Namespace, cases: Sequence[Case], repeats: int) -> int:
+def run_and_report(
+    args: argparse.Namespace, cases: Sequence[Case], repeats: int, judges: Judges
+) -> int:
     try:
         report = asyncio.run(
             cancel_on_sigterm(
@@ -236,6 +289,7 @@ def run_and_report(args: argparse.Namespace, cases: Sequence[Case], repeats: int
                     chaos_only=args.chaos,
                     case_filter=args.case,
                     progress=print,
+                    judges=judges,
                 )
             )
         )
@@ -251,7 +305,7 @@ def run_and_report(args: argparse.Namespace, cases: Sequence[Case], repeats: int
     if report.metadata.aborted is not None:
         print(f"aborted: {report.metadata.aborted}", file=sys.stderr)
         return EXIT_INFRA
-    return EXIT_OK if report.overall.passes == report.overall.runs else EXIT_FAILED
+    return EXIT_OK if report.overall.failures == 0 else EXIT_FAILED
 
 
 if __name__ == "__main__":

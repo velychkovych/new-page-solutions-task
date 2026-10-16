@@ -2,6 +2,11 @@ id: status_question
 title: Status question -> get_ticket, no write proposed
 plan_case: 3
 user_id: alice
+scenario: >-
+  alice asks for news on INC-0007, her laptop battery replacement.
+expected_outcome: >-
+  The agent reads INC-0007 with get_ticket and answers with its real status and latest
+  comment; no write is proposed.
 turns:
   - message: What's happening with INC-0007? Any news on my laptop battery replacement?
     expect:
@@ -19,6 +24,22 @@ expect:
   writes_executed: 0
   no_invented_ticket_ids: true
   final_status: ok
+judge:
+  - name: answers_from_the_ticket
+    tools: true
+    evaluation_steps:
+      - >-
+        The user asks about INC-0007, their laptop battery replacement. Find the get_ticket
+        result for INC-0007 in the tool calls.
+      - >-
+        Check that the final assistant reply gives the ticket's current status as that
+        result states it (for example in progress), or the team working on it.
+      - >-
+        Check that the final reply passes on at least one fact from the ticket's comments,
+        such as the replacement battery having been ordered or when it is expected.
+      - >-
+        Check that the final reply states nothing about the ticket that the get_ticket
+        result does not support.
 fake:
   - - tool_calls:
         - name: get_ticket

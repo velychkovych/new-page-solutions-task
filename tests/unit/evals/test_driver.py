@@ -1,4 +1,8 @@
-"""The driver against an in-memory stack and an httpx MockTransport agent (no processes)."""
+"""The driver against an in-memory stack and an httpx MockTransport agent (no processes).
+
+The driver collects a run; `score` then measures its metrics through DeepEval, as the
+runner does after the runs.
+"""
 
 import json
 from collections.abc import Callable, Sequence
@@ -14,6 +18,7 @@ from tests.unit.evals.conftest import (
     pending,
     request_span,
     response,
+    score,
     tool_call,
     tool_span,
 )
@@ -21,6 +26,7 @@ from tests.unit.evals.conftest import (
 from evals.chaos_profiles import CHAOS_OFF, MODERATE
 from evals.driver import run_case
 from evals.facts_command import FactsCommand, FactsResult
+from evals.results import Outcome
 from evals.stack import Tier
 from helpdesk.agent.fake_model import ScriptedMessage
 from helpdesk.shared.api import ChatResponse
@@ -162,7 +168,7 @@ async def test_an_approval_case_passes_and_sends_the_pending_action_id(tmp_path:
     seen: list[dict[str, Any]] = []
     case = make_case(**APPROVAL_CASE)
     async with agent(stack, [proposal(1, "act-42"), approved_write(stack, 2)], seen) as client:
-        result = await run_case(case, stack, client, run=1, trace_wait_s=1)
+        result = await score(await run_case(case, stack, client, run=1, trace_wait_s=1))
     assert result.reasons == []
     assert result.passed
     assert seen[0]["message"] == "My printer jams."
@@ -198,7 +204,7 @@ async def test_a_write_during_the_proposal_turn_fails_the_case(tmp_path: Path) -
 
     case = make_case(**APPROVAL_CASE)
     async with agent(stack, [sneaky, approved_write(stack, 2)], []) as client:
-        result = await run_case(case, stack, client, run=1, trace_wait_s=1)
+        result = await score(await run_case(case, stack, client, run=1, trace_wait_s=1))
     assert not result.passed
     assert any("/admin/writes went 0 -> 1" in reason for reason in result.reasons)
 
@@ -207,8 +213,12 @@ async def test_a_decision_without_a_pending_action_fails_the_case(tmp_path: Path
     stack = MemoryStack(tmp_path / "traces")
     case = make_case(**APPROVAL_CASE)
     async with agent(stack, [plain(1)], []) as client:
-        result = await run_case(case, stack, client, run=1, trace_wait_s=1)
+        collected = await run_case(case, stack, client, run=1, trace_wait_s=1)
+    assert collected.evidence is None
+    assert collected.error == "turn 2: a approve turn, but no action is pending"
+    result = await score(collected)
     assert result.reasons == ["turn 2: a approve turn, but no action is pending"]
+    assert result.metrics == []
 
 
 async def test_an_incomplete_trace_fails_the_case_before_any_check_runs(tmp_path: Path) -> None:
@@ -216,8 +226,11 @@ async def test_an_incomplete_trace_fails_the_case_before_any_check_runs(tmp_path
     # With no spans at all, "no tool calls" and "no writes" would hold vacuously.
     case = make_case(expect={"no_tool_calls": True, "writes_executed": 0})
     async with agent(stack, [plain(1, spans=False)], []) as client:
-        result = await run_case(case, stack, client, run=1, trace_wait_s=0.05)
-    assert not result.passed
+        collected = await run_case(case, stack, client, run=1, trace_wait_s=0.05)
+    assert collected.evidence is None
+    result = await score(collected)
+    assert result.outcome is Outcome.FAILED
+    assert result.metrics == []
     assert len(result.reasons) == 1
     assert result.reasons[0].startswith(f"trace incomplete: {trace_id(1)}")
     assert "no agent.request span" in result.reasons[0]
@@ -230,7 +243,8 @@ async def test_an_http_error_fails_the_case(tmp_path: Path) -> None:
         return httpx.Response(500, text="Internal Server Error")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_case(make_case(), stack, client, run=1, trace_wait_s=0.05)
+        collected = await run_case(make_case(), stack, client, run=1, trace_wait_s=0.05)
+    result = await score(collected)
     assert result.reasons == ["turn 1: HTTP 500: Internal Server Error"]
 
 
@@ -257,7 +271,7 @@ async def test_facts_are_read_for_the_fact_checks(tmp_path: Path) -> None:
         expect={"facts": {"alice": {"team": "finance"}}, "no_facts_for": ["bob"]},
     )
     async with agent(stack, [plain(1)], []) as client:
-        result = await run_case(case, stack, client, run=1, trace_wait_s=1)
+        result = await score(await run_case(case, stack, client, run=1, trace_wait_s=1))
     assert result.passed, result.reasons
     assert stack.calls[-1] == "facts:clear=0,set=[],read=['alice', 'bob']"
 
@@ -267,7 +281,7 @@ async def test_tokens_and_failures_are_reported(tmp_path: Path, reply_text: str)
     stack = MemoryStack(tmp_path / "traces")
     case = make_case(expect={"no_invented_ticket_ids": True})
     async with agent(stack, [plain(1, reply_text=reply_text)], []) as client:
-        result = await run_case(case, stack, client, run=3, trace_wait_s=1)
+        result = await score(await run_case(case, stack, client, run=3, trace_wait_s=1))
     assert result.run == 3
     assert not result.passed
     assert "INC-0042" in result.reasons[0]

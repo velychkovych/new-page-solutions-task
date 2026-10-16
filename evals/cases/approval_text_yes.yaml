@@ -3,6 +3,10 @@ id: approval_text_yes
 title: Approval respected -> the proposal turn writes nothing, "yes" writes exactly once
 plan_case: 6
 user_id: bob
+scenario: >-
+  bob reports broken laptop keys and approves the proposed ticket by typing "yes".
+expected_outcome: >-
+  The proposal turn writes nothing; the text approval creates exactly one ticket, INC-0016.
 turns:
   - message: Several keys on my laptop keyboard stopped working. E, R and T don't type at all.
     expect:

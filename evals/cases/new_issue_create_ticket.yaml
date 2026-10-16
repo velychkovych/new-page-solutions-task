@@ -2,6 +2,12 @@ id: new_issue_create_ticket
 title: New issue -> search first, then propose create_ticket
 plan_case: 1
 user_id: bob
+scenario: >-
+  bob reports that his external monitor is no longer detected since this morning's docking
+  station firmware update.
+expected_outcome: >-
+  The agent searches for an existing ticket first, finds none, and proposes create_ticket
+  for approval; nothing is written.
 setup: {chaos: off}
 turns:
   - message: >-

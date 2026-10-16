@@ -1,4 +1,9 @@
-"""latest.json and latest.md: run metadata, pass rate per case, tokens and latency."""
+"""latest.json and latest.md: run metadata, pass rate per case and per metric, tokens and
+latency.
+
+A run passes, fails, or is not exercised (it never reached what a check is about). The
+pass rate is over the exercised runs, with the not-exercised count next to it.
+"""
 
 import math
 from collections.abc import Sequence
@@ -7,7 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from evals.cases import Case
-from evals.results import CaseRunResult
+from evals.results import CaseRunResult, MetricKind, Outcome
 from evals.stack import Tier
 from evals.traces import TokenUsage
 
@@ -32,24 +37,48 @@ class RunMetadata(_Model):
     repeats: int
     chaos_only: bool
     case_filter: list[str]
+    # The model behind the judge metrics (JUDGE_MODEL_*), and why that one.
+    judge_model: str = "-"
+    judge_provider: str = "-"
+    judge_note: str = ""
     # Set when an infrastructure error ended the run early: the report holds only the
     # runs that finished before it.
     aborted: str | None = None
 
 
-class RunFailure(_Model):
+class RunNote(_Model):
     run: int
     reasons: list[str]
+
+
+class Tally(_Model):
+    runs: int
+    passes: int
+    failures: int
+    not_exercised: int
+    # passes / (runs - not_exercised); 0 when no run was exercised.
+    pass_rate: float
+
+    @property
+    def exercised(self) -> int:
+        return self.runs - self.not_exercised
 
 
 class CaseSummary(_Model):
     id: str
     title: str
     plan_case: list[int]
-    runs: int
-    passes: int
-    pass_rate: float
-    failures: list[RunFailure]
+    tally: Tally
+    failures: list[RunNote]
+    not_exercised: list[RunNote]
+
+
+class MetricSummary(_Model):
+    case_id: str
+    name: str
+    kind: MetricKind
+    evaluation_model: str | None
+    tally: Tally
 
 
 class CaseLatency(_Model):
@@ -66,17 +95,14 @@ class LatencySummary(_Model):
     per_case: list[CaseLatency]
 
 
-class Overall(_Model):
-    runs: int
-    passes: int
-    pass_rate: float
-
-
 class Report(_Model):
     metadata: RunMetadata
-    overall: Overall
+    overall: Tally
     cases: list[CaseSummary]
+    metrics: list[MetricSummary]
+    # The agent's tokens (LLM spans) and the judge's (DeepEval metric data), apart.
     tokens: TokenUsage
+    judge_tokens: TokenUsage
     latency: LatencySummary
     runs: list[CaseRunResult]
 
@@ -90,29 +116,58 @@ def percentile(values: Sequence[float], pct: float) -> float:
     return round(ordered[rank - 1], 1)
 
 
-def _rate(passes: int, runs: int) -> float:
-    return round(passes / runs, 3) if runs else 0.0
+def tally(outcomes: Sequence[Outcome]) -> Tally:
+    passes = sum(outcome is Outcome.PASSED for outcome in outcomes)
+    skipped = sum(outcome is Outcome.NOT_EXERCISED for outcome in outcomes)
+    exercised = len(outcomes) - skipped
+    return Tally(
+        runs=len(outcomes),
+        passes=passes,
+        failures=exercised - passes,
+        not_exercised=skipped,
+        pass_rate=round(passes / exercised, 3) if exercised else 0.0,
+    )
+
+
+def _notes(runs: Sequence[CaseRunResult], outcome: Outcome) -> list[RunNote]:
+    return [RunNote(run=r.run, reasons=r.reasons) for r in runs if r.outcome is outcome]
+
+
+def _metric_summaries(case: Case, runs: Sequence[CaseRunResult]) -> list[MetricSummary]:
+    names: dict[str, MetricSummary] = {}
+    for run in runs:
+        for metric in run.metrics:
+            if metric.name not in names:
+                outcomes = [m.outcome for r in runs for m in r.metrics if m.name == metric.name]
+                names[metric.name] = MetricSummary(
+                    case_id=case.id,
+                    name=metric.name,
+                    kind=metric.kind,
+                    evaluation_model=metric.evaluation_model,
+                    tally=tally(outcomes),
+                )
+    return list(names.values())
 
 
 def build_report(
     metadata: RunMetadata, cases: Sequence[Case], results: Sequence[CaseRunResult]
 ) -> Report:
     summaries: list[CaseSummary] = []
+    metrics: list[MetricSummary] = []
     per_case: list[CaseLatency] = []
     for case in cases:
         runs = [r for r in results if r.case_id == case.id]
-        passes = sum(r.passed for r in runs)
         summaries.append(
             CaseSummary(
                 id=case.id,
                 title=case.title,
                 plan_case=case.plan_case,
-                runs=len(runs),
-                passes=passes,
-                pass_rate=_rate(passes, len(runs)),
-                failures=[RunFailure(run=r.run, reasons=r.reasons) for r in runs if not r.passed],
+                tally=tally([r.outcome for r in runs]),
+                failures=_notes(runs, Outcome.FAILED),
+                not_exercised=_notes(runs, Outcome.NOT_EXERCISED),
             )
         )
+        metrics += _metric_summaries(case, runs)
         totals = [sum(t.latency_ms for t in r.turns) for r in runs]
         if totals:
             per_case.append(
@@ -123,12 +178,13 @@ def build_report(
                 )
             )
     latencies = [turn.latency_ms for r in results for turn in r.turns]
-    passes = sum(r.passed for r in results)
     return Report(
         metadata=metadata,
-        overall=Overall(runs=len(results), passes=passes, pass_rate=_rate(passes, len(results))),
+        overall=tally([r.outcome for r in results]),
         cases=summaries,
+        metrics=metrics,
         tokens=sum((r.tokens for r in results), TokenUsage()),
+        judge_tokens=sum((r.judge_tokens for r in results), TokenUsage()),
         latency=LatencySummary(
             turns=len(latencies),
             p50_ms=percentile(latencies, 50),
@@ -144,8 +200,23 @@ def md_cell(text: str) -> str:
     return " ".join(text.split()).replace("|", "\\|")
 
 
-def _pct(rate: float) -> str:
-    return f"{rate * 100:.0f}%"
+def rate_text(t: Tally) -> str:
+    """`passes/exercised (rate)`, with the not-exercised runs next to it."""
+    rate = f"{t.pass_rate * 100:.0f}%" if t.exercised else "n/a"
+    text = f"{t.passes}/{t.exercised} ({rate})"
+    return f"{text}, {t.not_exercised} not exercised" if t.not_exercised else text
+
+
+def _run_notes(title: str, cases: Sequence[CaseSummary], *, failures: bool) -> list[str]:
+    lines = ["", f"## {title}", ""]
+    listed = [(c, c.failures if failures else c.not_exercised) for c in cases]
+    if not any(notes for _, notes in listed):
+        return [*lines, "None."]
+    for case, notes in listed:
+        for note in notes:
+            lines.append(f"- `{case.id}` run {note.run}:")
+            lines += [f"  - {md_cell(reason)}" for reason in note.reasons]
+    return lines
 
 
 def render_markdown(report: Report) -> str:
@@ -170,44 +241,60 @@ def render_markdown(report: Report) -> str:
         f"| Tier | {meta.tier.value} |",
         f"| Model (from LLM spans) | {', '.join(meta.models) or '-'} |",
         f"| Provider (from LLM spans) | {', '.join(meta.providers) or '-'} |",
+        f"| Judge model | {meta.judge_model} ({meta.judge_provider}) |",
+        f"| Judge note | {md_cell(meta.judge_note) or '-'} |",
         f"| Repeats | {meta.repeats} |",
         f"| Chaos cases only | {'yes' if meta.chaos_only else 'no'} |",
         f"| Case filter | {', '.join(meta.case_filter) or 'all'} |",
-        f"| **Overall pass rate** | **{report.overall.passes}/{report.overall.runs}"
-        f" ({_pct(report.overall.pass_rate)})** |",
+        f"| **Overall pass rate** | **{rate_text(report.overall)}** |",
+        "",
+        "Runs pass, fail, or are not exercised: the run never reached what a check is",
+        "about. The pass rate is over the exercised runs.",
         "",
         "## Cases",
         "",
-        "| Case | PLAN # | Runs | Passes | Pass rate |",
-        "|---|---|---|---|---|",
+        "| Case | PLAN # | Runs | Passes | Failures | Not exercised | Pass rate |",
+        "|---|---|---|---|---|---|---|",
     ]
     lines += [
-        f"| `{c.id}` | {', '.join(map(str, c.plan_case))} | {c.runs} | {c.passes}"
-        f" | {_pct(c.pass_rate)} |"
+        f"| `{c.id}` | {', '.join(map(str, c.plan_case))} | {c.tally.runs} | {c.tally.passes}"
+        f" | {c.tally.failures} | {c.tally.not_exercised} | {rate_text(c.tally)} |"
         for c in report.cases
     ]
-    failed = [c for c in report.cases if c.failures]
-    lines += ["", "## Failures", ""]
-    if not failed:
-        lines.append("None.")
-    for case in failed:
-        for failure in case.failures:
-            lines.append(f"- `{case.id}` run {failure.run}:")
-            lines += [f"  - {md_cell(reason)}" for reason in failure.reasons]
+    lines += [
+        "",
+        "## Metrics (DeepEval)",
+        "",
+        "Deterministic metrics run the checks in `evals/checks.py` on the trace evidence;",
+        "judge metrics (`ConversationalGEval`, strict) grade only what a reply means.",
+        "",
+        "| Case | Metric | Kind | Evaluated by | Passes | Failures | Not exercised |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    lines += [
+        f"| `{m.case_id}` | {md_cell(m.name)} | {m.kind.value} | {m.evaluation_model or '-'}"
+        f" | {m.tally.passes} | {m.tally.failures} | {m.tally.not_exercised} |"
+        for m in report.metrics
+    ]
+    lines += _run_notes("Failures", report.cases, failures=True)
+    lines += _run_notes("Not exercised", report.cases, failures=False)
     tokens = report.tokens
+    judge = report.judge_tokens
     latency = report.latency
     lines += [
         "",
-        "## Tokens (from the LLM spans)",
+        "## Tokens",
         "",
-        "Input counts every prompt token, the cached ones included (OpenInference's",
-        "`llm.token_count.prompt`); cache read and cache write are the parts of it served",
-        "from or written to the prompt cache.",
+        "Agent: from the LLM spans. Input counts every prompt token, the cached ones",
+        "included (OpenInference's `llm.token_count.prompt`); cache read and cache write are",
+        "the parts of it served from or written to the prompt cache. Judge: from DeepEval's",
+        "metric data (the judge model's usage).",
         "",
-        "| Input | Output | Cache read | Cache write | Input + output |",
-        "|---|---|---|---|---|",
-        f"| {tokens.input} | {tokens.output} | {tokens.cache_read} | {tokens.cache_write}"
+        "| Model | Input | Output | Cache read | Cache write | Input + output |",
+        "|---|---|---|---|---|---|",
+        f"| Agent | {tokens.input} | {tokens.output} | {tokens.cache_read} | {tokens.cache_write}"
         f" | {tokens.total} |",
+        f"| Judge | {judge.input} | {judge.output} | - | - | {judge.total} |",
         "",
         "## Latency (client side, per /chat request)",
         "",

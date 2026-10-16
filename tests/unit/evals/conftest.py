@@ -1,8 +1,10 @@
 """Builders for the evals unit tests: spans, responses, cases and evidence, all in memory.
 
-Nothing here starts a process or touches the network.
+Nothing here starts a process or touches the network. Importing `evals` here, before any
+test module, also sets up the DeepEval containment before deepeval is first imported.
 """
 
+import asyncio
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,8 +12,13 @@ from typing import Any
 from pydantic import JsonValue
 
 from evals.cases import Case, MessageTurn
+from evals.dataset import build_test_case, golden
+from evals.driver import CollectedRun
 from evals.evidence import CaseEvidence, Facts, TurnRun
-from evals.traces import TurnTrace
+from evals.judges import Judges, scripted_judges
+from evals.results import CaseRunResult
+from evals.scoring import score_run
+from evals.traces import TokenUsage, TurnTrace
 from helpdesk.shared import trace_attributes as ta
 from helpdesk.shared.api import (
     ChatRequest,
@@ -229,3 +236,29 @@ def evidence(
         writes=writes or WritesReport(total=0, by_key={}),
         facts=facts or {},
     )
+
+
+def deepeval_case(ev: CaseEvidence, run: int = 1) -> Any:
+    """The DeepEval test case of `ev`, as the runner builds it."""
+    return build_test_case(golden(ev.case), ev, run)
+
+
+def collected(ev: CaseEvidence | None, *, error: str | None = None, run: int = 1) -> CollectedRun:
+    case = ev.case if ev is not None else make_case()
+    return CollectedRun(
+        case=case,
+        run=run,
+        turns=[],
+        evidence=ev,
+        error=error,
+        duration_s=0.1,
+        tokens=TokenUsage(),
+        models=[],
+        providers=[],
+    )
+
+
+async def score(run: CollectedRun, judges: Judges | None = None) -> CaseRunResult:
+    """Score one collected run through DeepEval (the scripted judge by default)."""
+    judges = judges or scripted_judges()
+    return await score_run(run, golden(run.case), judges.judge_for, asyncio.Semaphore(4))

@@ -4,6 +4,11 @@ id: memory_isolation
 title: Memory isolation -> bob never sees alice's facts
 plan_case: 10
 user_id: bob
+scenario: >-
+  alice has her team and office stored; bob asks which team and office are on file for him.
+expected_outcome: >-
+  alice's facts reach only alice's model input; bob's reply and model input hold none of
+  them.
 setup:
   facts:
     alice: {team: Payroll Systems, office_location: "Lisbon office, floor 4"}

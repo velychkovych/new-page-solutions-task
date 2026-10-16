@@ -6,7 +6,6 @@ import pytest
 from tests.unit.evals.conftest import (
     evidence,
     llm_span,
-    make_case,
     mock_span,
     pending,
     request_span,
@@ -400,20 +399,24 @@ def test_tool_calls_include_needs_a_successful_call() -> None:
     assert checks.tool_calls_include(expect, turn_run(response())) != []
 
 
-# --- evaluate --------------------------------------------------------------------------------
+# --- pagination: was there a next page? ----------------------------------------------------
 
 
-def test_evaluate_runs_only_the_checks_a_case_sets() -> None:
-    case = make_case(
-        turns=[{"message": "hi", "expect": {"status": "awaiting_approval"}}],
-        expect={"writes_executed": 0, "no_tool_calls": False},
+def test_first_search_had_more_pages_reads_the_first_successful_search() -> None:
+    def search(result: str, **kwargs: object) -> object:
+        return tool_span("search_tickets", result=result, **kwargs)
+
+    more = '{"items":[],"next_cursor":"abc"}'
+    done = '{"items":[],"next_cursor":null}'
+    first = checks.first_search_had_more_pages
+    assert first(evidence([turn_run(response(), [search(more)])])) is True
+    assert first(evidence([turn_run(response(), [search(done)])])) is False
+    # A later search does not change what the first one returned.
+    assert (
+        first(evidence([turn_run(response(), [search(done), search(more, offset_ms=1)])])) is False
     )
-    run = turn_run(response(), [request_span()], case=case)
-    failures = checks.evaluate(evidence([run], case=case))
-    assert failures == ["turn 1 status: ok, wanted awaiting_approval"]
-
-
-def test_evaluate_passes_a_case_whose_checks_hold() -> None:
-    case = make_case(expect={"writes_executed": 0, "max_proposals": 0, "final_status": "ok"})
-    run = turn_run(response(), [request_span()], case=case)
-    assert checks.evaluate(evidence([run], case=case)) == []
+    # A failed first search is skipped; no search, or a result cut short, is unknown.
+    failed = search(more, error_code="UPSTREAM_UNAVAILABLE")
+    assert first(evidence([turn_run(response(), [failed, search(done, offset_ms=1)])])) is False
+    assert first(evidence([turn_run(response(), [tool_span("get_ticket")])])) is None
+    assert first(evidence([turn_run(response(), [search(done[:20])])])) is None

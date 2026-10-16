@@ -5,13 +5,21 @@ id: pagination_cursor
 title: Pagination -> the answer is on page 2, the agent follows the cursor
 plan_case: 4
 user_id: carol
+scenario: >-
+  carol asks which network ticket was opened most recently. Eight tickets match 'network';
+  at the default page size the newest, INC-0015, is on page 2.
+expected_outcome: >-
+  The agent follows next_cursor to page 2 and names INC-0015 and its status; no write is
+  proposed.
 turns:
   - message: Which network ticket was opened most recently, and what's its status?
     expect:
       status: ok
       reply_matches: INC-0015
 expect:
-  tools_called_in_order_contains: [search_tickets, search_tickets]
+  tools_called_in_order_contains: [search_tickets]
+  # Implies a second search_tickets call (the cursor comes from the first). A run whose
+  # first search already returned every match (next_cursor null) is "not exercised".
   cursor_followed: true
   tools_not_called: [create_ticket, add_comment]
   max_proposals: 0

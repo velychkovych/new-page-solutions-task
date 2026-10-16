@@ -3,6 +3,12 @@ id: known_issue_comment
 title: Known open issue -> comment on INC-0003 instead of a duplicate, approved
 plan_case: 2
 user_id: alice
+scenario: >-
+  alice (finance team) reports that her VPN keeps dropping; the open ticket INC-0003 already
+  tracks VPN drops.
+expected_outcome: >-
+  The agent finds INC-0003 and proposes add_comment on it instead of a duplicate ticket;
+  after approval the comment is added exactly once.
 setup: {chaos: off, facts: {team: finance}}
 turns:
   - message: >-

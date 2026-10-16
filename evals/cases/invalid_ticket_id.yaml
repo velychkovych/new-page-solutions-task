@@ -2,6 +2,11 @@ id: invalid_ticket_id
 title: Unknown ticket id -> NOT_FOUND handled, the agent asks instead of guessing
 plan_case: 13
 user_id: alice
+scenario: >-
+  alice asks about INC-0999, which does not exist.
+expected_outcome: >-
+  The agent handles NOT_FOUND: it says the ticket was not found and asks for the right id
+  instead of guessing.
 turns:
   - message: Can you check on INC-0999 for me? It's my request for a second monitor.
     expect:
@@ -21,6 +26,20 @@ expect:
   writes_executed: 0
   no_invented_ticket_ids: true
   final_status: ok
+judge:
+  - name: not_found_asks_for_id
+    tools: true
+    evaluation_steps:
+      - >-
+        The user asks about INC-0999, which does not exist: get_ticket returned NOT_FOUND.
+      - >-
+        Check that the final assistant reply tells the user that no ticket INC-0999 was
+        found.
+      - >-
+        Check that the reply asks the user to check the ticket id or to give the right one.
+        Offering to search for their request as well is fine.
+      - >-
+        Check that the reply states no status or progress for INC-0999.
 fake:
   - - tool_calls:
         - name: get_ticket
