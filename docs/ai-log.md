@@ -843,6 +843,62 @@ after `docker compose restart` therefore continues the script.
 - Pass `on_progress` only on streamed runs, so /chat does not ask the MCP server for
   progress notifications. Today they are sent and dropped.
 
+## 2026-10-16 — Phase 3 (tracks F and G): build, review, first live eval
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- Workflow 1 (build), two agents in parallel:
+  - Track F on master (`be13fa3..3d33513`): `evals/` harness (YAML cases, runner, live and
+    fake tiers, trace-completeness guard, checks, report), the `agent-eval` compose service
+    (profile `eval`, 127.0.0.1:8082), Makefile/pyproject/.gitignore edits, `agent-eval` added
+    to both isolation tests.
+  - Track G in a worktree (`35f0b3e..4f514bd`, merged in `b216881`): README architecture and
+    graph diagrams, traceability table, AGENTCORE mapping diagram (PLAN-named mappings solid,
+    the rest dashed "candidate — author to confirm"), `scripts/demo.md`, stale-fact fixes.
+- Workflow 2 (review): five lenses (assertion soundness with mutation probes, case
+  conformance, runner robustness, CLAUDE.md rules, docs facts), one adversarial verifier per
+  finding. 22 confirmed (all minor), 10 refuted.
+- Workflow 3 (fix): evals fixer (`58504c8..fac78a5`), docs fixer (`13d4ec0..60da652`),
+  independent recheck: 19/19 fixed, 3 low-severity regex edge cases left (see Unsure).
+- Orchestrator: merged Track G, ran the first full live eval (`17f4e31`), analysed its
+  failures from the traces, and ran a DeepEval assessment (workflow 4: compatibility probe in
+  a throwaway worktree, installed-API study with 2 billed judge calls, external research,
+  skeptic critique). The author then chose Full DeepEval, a Haiku judge, the prompt fix and
+  "not exercised" for pagination (entries below).
+
+### Verified, and how
+
+- After the fixes (`60da652`): `make lint` `All checks passed!`; `make typecheck`
+  `Success: no issues found in 93 source files`; `make test` `1222 passed, 11 warnings`;
+  fake tier `13/13`.
+- First live run (`make eval`, git `60da65296ad3`, `claude-sonnet-5-5`, 3 repeats):
+  29/39 (74%), 317,755 tokens. From the traces:
+  - 7 of 10 failures: the model wrote the proposal as text and asked "Do you approve?"
+    without calling the write tool, so no pending action existed (fixed in `e7e547f`).
+  - 3 of 10: `pagination_cursor`; the model searched `page_size: 20` and answered correctly
+    without a second page (now "not exercised").
+- Secrets: no token or key value in `evals/results/*`, checked by substring count (0).
+
+### Deviations from the plan
+
+- New compose service `agent-eval` (profile `eval`, :8082, own volume, `traces/eval/`), so
+  resetting facts and `--model` never touch the browser agent. `make test-e2e` also starts
+  it, so it now needs a non-empty `ANTHROPIC_API_KEY`.
+- The runner starts `agent-eval` with `--no-deps` after checking mock and mcp are healthy.
+- `make test` runs the fake tier (3 local stacks in parallel); it grew from ~40 s to ~60 s
+  before the DeepEval rewrite.
+
+### Unsure — author should review
+
+- AGENTCORE diagram: five dashed candidate edges (agent → Runtime, mcp → Gateway,
+  `MOCK_API_TOKEN` → Identity, Store → Memory, CloudWatch → Observability).
+- `scripts/demo.md` chaos step relies on the seeded draw order (seed 42) and on the model
+  proposing `add_comment` on INC-0003.
+- README §c lists three places where the graph code differs from the CONTRACTS §5.1 drawing
+  (a `propose → agent` edge; rejected calls go through `tools`; a cut-off single write goes to
+  `tools`).
+- Reply regexes still have edge cases, e.g. case 13 accepts any question mark as "asks".
+
 ## 2026-10-16 — Phase 3 / Track F: DeepEval rewrite, judge model, agent prompt fix
 
 ### Delegated to AI (Claude Code, Opus 5.5)
@@ -959,3 +1015,37 @@ No live eval was run and no paid model API was called.
   errors as failures, or exit 0).
 - The pre-commit hook had been repointed to a deleted scratch worktree by a recheck
   agent's `make setup`. Restored with `uv run pre-commit install`.
+
+## 2026-10-16 — Phase 3 gate: live eval after the prompt fix and the DeepEval rewrite
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- Orchestrator: rebuilt the stack (`make up`, then `agent-eval` with `--build --no-deps`) so
+  the agent image carries the prompt fix `e7e547f`, ran `make eval`, filled the README
+  "Latest results" placeholder from `evals/results/latest.md`, wrote this entry.
+
+### Verified, and how
+
+- `make eval` (git `d41f4053bdbd`, agent `claude-sonnet-5-5`, judge `claude-haiku-5-5`,
+  3 repeats): **34/36 (94%), 3 not exercised, 0 judge errors**; exit 1 (two failed runs).
+  - Agent tokens 351,263 (cache read 312,248); judge tokens 43,561.
+  - Every case that proposes a write passed 3/3 (cases 1, 2, 5, 6, 9, 11). In the first run
+    they produced 7 failures from text-only proposals; none recurred.
+  - `status_question` run 1: the judge failed a reply that stated an arrival date derived
+    from "ETA 3 working days".
+  - `invalid_ticket_id` run 2: `no_invented_ticket_ids` failed on `INC-1234` in the reply
+    (probably an example id; the check does not tell examples from claims).
+  - `pagination_cursor`: 3/3 not exercised (`page_size: 20`, no cursor returned).
+- Gate on master: `make lint` `All checks passed!` / `187 files already formatted`;
+  `make typecheck` `Success: no issues found in 97 source files`; `make test`
+  `1339 passed, 11 warnings in 119.74s`; `make test-e2e` `22 passed in 32.70s`.
+- README `<!-- HUMAN: write this -->` markers: 23; AGENTCORE: 6.
+- No token or key value in `evals/results/*` (substring count 0).
+
+### Unsure — author should review
+
+- Whether `no_invented_ticket_ids` should allow example ids such as `INC-1234` given as a
+  format hint (today it fails them).
+- Whether the Haiku judge's strictness on derived facts (case 3, step 5) matches what the
+  author wants.
+- `make test` now takes about 2 minutes (was ~40 s before Phase 3).

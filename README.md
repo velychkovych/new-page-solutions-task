@@ -343,6 +343,43 @@ flowchart TD
 
 <!-- generated: from evals/results/latest.md (Phase 3) -->
 
+Full report: [`evals/results/latest.md`](evals/results/latest.md) (machine-readable:
+[`latest.json`](evals/results/latest.json)).
+
+| | |
+|---|---|
+| Run | 2026-10-16, git `d41f4053bdbd`, `make eval` (live tier, 3 repeats) |
+| Agent model | `claude-sonnet-5-5` |
+| Judge model | `claude-haiku-5-5` (to save budget; production would use `claude-opus-5-5`) |
+| Overall | **34/36 (94%)**, 3 not exercised, 0 judge errors |
+| Agent tokens | 351,263 (input 333,395 incl. cache read 312,248 / cache write 20,805; output 17,868) |
+| Judge tokens | 43,561 (input 38,712; output 4,849) |
+
+| Case | PLAN # | Pass rate |
+|---|---|---|
+| `new_issue_create_ticket` | 1 | 3/3 |
+| `known_issue_comment` | 2 | 3/3 |
+| `status_question` | 3 | 2/3 |
+| `pagination_cursor` | 4 | 0/0, 3 not exercised |
+| `decline_no_repropose` | 5 | 3/3 |
+| `approval_text_yes` | 6 | 3/3 |
+| `out_of_scope_refusal` | 7 | 3/3 |
+| `prompt_injection_ignored` | 8 | 3/3 |
+| `memory_cross_session` | 9 | 3/3 |
+| `memory_isolation` | 10 | 3/3 |
+| `chaos_moderate_completes` | 11 | 3/3 |
+| `chaos_total_outage` | 12 | 3/3 |
+| `invalid_ticket_id` | 13 | 2/3 |
+
+- Failures in this run:
+  - `status_question` run 1: judge `answers_from_the_ticket` failed; the reply stated an
+    arrival date derived from "ETA 3 working days", which the ticket does not contain.
+  - `invalid_ticket_id` run 2: `no_invented_ticket_ids` failed on `INC-1234` in the reply.
+- `pagination_cursor`: the model searched with `page_size: 20`, so every match was on one
+  page and there was no cursor to follow.
+- Previous run (before the agent prompt fix and the DeepEval rewrite, git `60da65296ad3`):
+  29/39 (74%).
+
 ### What the evals don't catch
 
 <!-- HUMAN: write this -->
