@@ -842,3 +842,39 @@ after `docker compose restart` therefore continues the script.
   the trace-context issue.
 - Pass `on_progress` only on streamed runs, so /chat does not ask the MCP server for
   progress notifications. Today they are sent and dropped.
+
+## 2026-10-16 — Evals (DeepEval rewrite): review fixes
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+Fixes for the confirmed review findings on `17f4e31..556b466` (areas evals and platform).
+No live eval was run and no paid model API was called.
+
+### What changed
+
+| Commit | Change |
+|---|---|
+| `784a8a8` | Cases 5, 7, 9 and 10 set `no_invented_ticket_ids`. Cases 5 and 9 require `search_tickets` before the proposal. `known_issue_comment` requires a successful turn-1 `get_ticket`. |
+| `52d183f` | README case table regenerated from `python -m evals.run --list`. |
+| `03beca8` | Pagination is "not exercised" only when no successful search returned a cursor. Before, only the first search was checked. PLAN wording updated. |
+| `d72f3f9` | `LangChainJudge`: JSON-text answers from models without forced tool choice (claude-opus-5-5, claude-sonnet-5-5) go to DeepEval's JSON parser. A `TypeError` is one `JudgeError`, not a second schemaless call. A failed call's tokens are counted. |
+| `ff0d780` | Containment: `DEEPEVAL_DISABLE_LEGACY_KEYFILE=1`, a per-user DeepEval folder, and inherited `DEEPEVAL_*` / `CONFIDENT_*` variables removed. |
+| `5f5bdc4` | The live judge reads only `JUDGE_FIELDS` from `ROOT/.env`, so the mock tokens stay out of the runner. A settings `ValidationError` prints field and message only. CONTRACTS §7 records this. |
+| `fbcf12a` | The `.deepeval/` containment assertions compare before and after the run, not "does not exist". |
+
+### Verified, and how
+
+- Each fix has a test that failed before it, run against the old code (stash or temporary
+  revert): fake-tier mutants for the case files; unit tests for the pagination rule, the
+  judge (a real `ChatAnthropic` with a canned reply), the keyfile, `judge_settings` and the
+  error print.
+- `make lint typecheck test`: `1317 passed, 11 warnings`. The stray empty `.deepeval/` was
+  still at the repo root during the run.
+- `python -m evals.run --fake --out <scratch>`: `Pass rate: 13/13 (100%)`.
+
+### Unsure — author should review
+
+- The JSON-text fallback for Opus/Sonnet judges was tested offline only. How often those
+  models answer in text instead of calling the tool is not measured.
+- The empty, gitignored `.deepeval/` at the repo root (16:13 today) was not made by tracked
+  code. It was left in place; it can be deleted.
