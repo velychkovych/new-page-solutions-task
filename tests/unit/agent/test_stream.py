@@ -937,3 +937,47 @@ async def test_shutdown_waits_for_a_streamed_turn_whose_client_left(
         async with httpx.AsyncClient(transport=transport, base_url="http://agent.test") as client:
             view = (await client.get("/sessions/alice/s1")).json()
     assert view["pending_action"]["tool"] == "create_ticket"
+
+
+async def _start_stream_and_leave(app: Any, body: dict[str, Any]) -> None:
+    """A client that starts a stream and disconnects before reading anything."""
+    payload = json.dumps(body).encode()
+    request_sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": payload, "more_body": False}
+        await asyncio.sleep(0.05)
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        return None
+
+    await asyncio.wait_for(app(_asgi_scope("/chat/stream"), receive, send), timeout=5)
+
+
+async def test_shutdown_does_not_start_queued_streamed_turns(
+    settings, provider, fake_model, make_ai, spans
+):
+    """Shutdown waits for the running turn (bounded by its deadline) but not for the turns
+    queued behind it: they end without running, so the drain is not N deadlines long."""
+    deadline_s = 0.5
+    model = fake_model(responses=[make_ai("late")], delay_s=30.0, repeat_last=True)
+    app = create_app(
+        settings=settings.model_copy(update={"turn_deadline_s": deadline_s}),
+        tool_provider=provider,
+        model=model,
+        tracer=spans[0].get_tracer("t"),
+    )
+    async with app.router.lifespan_context(app):
+        for i in range(4):
+            await _start_stream_and_leave(app, {**BODY, "message": f"message {i}"})
+        stopping = asyncio.get_running_loop().time()
+    drained_s = asyncio.get_running_loop().time() - stopping
+
+    assert drained_s < 2 * deadline_s
+    assert len(model.calls) == 1  # only the turn that held the lock ever reached the model
+    request_spans = [s for s in spans[1].get_finished_spans() if s.name == attrs.SPAN_REQUEST]
+    assert [s.attributes[attrs.REQUEST_STATUS] for s in request_spans] == ["error"] * 4

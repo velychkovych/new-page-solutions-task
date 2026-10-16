@@ -95,6 +95,9 @@ services:
       - ./traces:/app/traces
     networks: [agent_net]
     ports: ["127.0.0.1:8080:8080"]
+    # Shutdown lets a running turn finish, bounded by TURN_DEADLINE_S (90 s by default),
+    # so it can save its checkpoint. Docker's default 10 s would SIGKILL it first.
+    stop_grace_period: 100s
     depends_on:
       mcp: {condition: service_healthy}
     healthcheck:
@@ -128,6 +131,7 @@ services:
       - ./tests/e2e/fixtures:/app/e2e:ro
     networks: [agent_net]
     ports: ["127.0.0.1:8081:8080"]
+    stop_grace_period: 100s  # as for `agent`
     depends_on:
       mcp: {condition: service_healthy}
     healthcheck:

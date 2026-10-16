@@ -70,6 +70,10 @@ def proposal_reply(ai_text: str, pending: PendingAction) -> str:
     return f"{ai_text}\n\n{ask}" if ai_text else ask
 
 
+class ShuttingDownError(Exception):
+    """The app began shutting down before this turn got its thread lock."""
+
+
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
     reply: str
@@ -185,6 +189,9 @@ class ChatService:
         self._locks = ThreadLocks()
         # Strong references: the event loop keeps only weak ones to tasks.
         self._streamed_turns: set[asyncio.Task[None]] = set()
+        # Set once shutdown starts: a turn still waiting for its thread lock then ends
+        # without running, so the drain waits for one turn per thread, not for a queue.
+        self._closing = False
 
     def _config(self, user_id: str, session_id: str) -> RunnableConfig:
         return build_run_config(user_id, session_id, recursion_limit=self._settings.recursion_limit)
@@ -205,9 +212,24 @@ class ChatService:
         return aiter(events)
 
     async def wait_for_streamed_turns(self) -> None:
-        """Let running streamed turns finish (app shutdown), so none loses its checkpoint."""
-        if self._streamed_turns:
-            await asyncio.gather(*self._streamed_turns, return_exceptions=True)
+        """Let running streamed turns finish (app shutdown), so none loses its checkpoint.
+
+        Turns queued behind them end without running. The wait is bounded by one turn
+        deadline: a running turn's deadline started before shutdown did, so it has fired
+        by then. Whatever is left is cancelled, which is the same as a crash: every node
+        that finished is checkpointed, and an unfinished write is re-run with its key.
+        """
+        self._closing = True
+        if not self._streamed_turns:
+            return
+        _, pending = await asyncio.wait(
+            set(self._streamed_turns), timeout=self._settings.turn_deadline_s
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            logger.warning("cancelled %d streamed turns at shutdown", len(pending))
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _streamed_turn(self, request: ChatRequest, events: TurnEvents) -> None:
         try:
@@ -246,7 +268,10 @@ class ChatService:
                 history = _messages(start)
                 if events is not None:
                     events.begin(trace_id, history)
-                outcome = await self._limited_turn(request, config, span, start, events)
+                if self._closing:
+                    outcome = self._failed(span, ShuttingDownError(), INTERRUPTED_REPLY)
+                else:
+                    outcome = await self._limited_turn(request, config, span, start, events)
                 after = _messages(await self._graph.aget_state(config))
                 response = _response(outcome, history, after, trace_id)
                 span.set_attribute(attrs.REQUEST_STATUS, outcome.status.value)
