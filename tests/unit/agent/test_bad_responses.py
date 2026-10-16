@@ -36,6 +36,8 @@ CREATE_ARGS = {
     "category": "hardware",
     "priority": "medium",
 }
+# A long description is where broken JSON is most likely: an escaped quote, then nothing.
+CUT_CREATE_JSON = '{"title": "Laptop", "description": "Says \\"low'
 COMMENT_ARGS = {"ticket_id": "INC-0003", "body": "Dropped again at 10:00."}
 TOOL_NAMES = ["search_tickets", "get_ticket", "create_ticket", "add_comment", "remember_fact"]
 # Used only to format requests, never to send one.
@@ -405,6 +407,55 @@ async def test_an_invalid_call_without_id_or_name_still_gets_one_answer(
     assert provider.calls == []
 
 
+@pytest.mark.parametrize(
+    ("message", "cause"),
+    [
+        pytest.param(
+            _reply(
+                {
+                    "type": "tool_use",
+                    "id": "w1",
+                    "name": "create_ticket",
+                    "input": {},
+                    "partial_json": CUT_CREATE_JSON,
+                },
+                invalid_tool_calls=[_invalid("create_ticket", CUT_CREATE_JSON, "w1")],
+            ),
+            "JSON",
+            id="unparseable",
+        ),
+        pytest.param(
+            AIMessage(
+                content="", tool_calls=[{"name": "create_ticket", "args": CREATE_ARGS, "id": None}]
+            ),
+            "without a tool call id",
+            id="missing-id",
+        ),
+    ],
+)
+async def test_a_lone_broken_write_is_rejected_and_never_proposed(
+    *, make_client, provider, fake_model, make_ai, message, cause
+):
+    """The one-write shape that must not reach propose: it could not be paired or parsed."""
+    model = fake_model(responses=[message, make_ai("Let me write that ticket again.")])
+
+    _, reply = await _turn(make_client, provider, model)
+
+    (tool_message,) = _tool_messages(model.calls[1])
+    assert tool_message.tool_call_id
+    error = _error(tool_message)
+    assert error.code is ErrorCode.INVALID_ARGUMENT
+    assert "create_ticket" in error.what
+    assert cause in error.what
+    (record,) = reply.tool_calls
+    _rejected_record(record, "create_ticket", ErrorCode.INVALID_ARGUMENT)
+    assert_well_formed(model.calls[1])
+    assert reply.reply == "Let me write that ticket again."
+    assert reply.status is ChatStatus.OK
+    assert reply.pending_action is None
+    assert provider.calls == []
+
+
 @pytest.mark.parametrize("content", ["", "   \n", []], ids=["empty", "whitespace", "no-blocks"])
 async def test_an_empty_final_answer_gets_the_fallback_reply(
     make_client, provider, fake_model, make_ai, content
@@ -453,6 +504,34 @@ async def test_an_empty_answer_after_a_failed_write_does_not_claim_it_was_saved(
 
     assert done.reply == final_reply.EMPTY_AFTER_FAILED_WRITE_REPLY
     assert "could not confirm" in done.reply
+
+
+@pytest.mark.parametrize(
+    "saved", [True, False], ids=["after-a-saved-write", "after-a-failed-write"]
+)
+async def test_an_empty_answer_in_a_later_turn_makes_no_claim_about_an_earlier_write(
+    make_client, provider, fake_model, make_ai, saved
+):
+    if not saved:
+        conflict = "ERROR CONFLICT: Key reused with a different body. Next step: Do not retry."
+        provider.replies["create_ticket"] = [ToolResult(text=conflict, is_error=True)]
+    model = fake_model(
+        responses=[
+            make_ai("", ("create_ticket", CREATE_ARGS, "w1")),
+            make_ai("Done, see the ticket."),
+            AIMessage(""),
+        ]
+    )
+    client, _ = await _turn(make_client, provider, model)
+    await _chat(client, message="yes")
+
+    later = await _chat(client, message="thanks")
+
+    assert later.reply == final_reply.EMPTY_REPLY
+    assert later.tool_calls == []
+    assert later.status is ChatStatus.OK
+    assert len(provider.writes()) == 1
+    assert_well_formed(model.calls[-1])
 
 
 async def test_a_truncated_text_answer_says_it_was_cut_off(
