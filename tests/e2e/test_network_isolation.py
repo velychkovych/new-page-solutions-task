@@ -1,6 +1,7 @@
 """Against the running stack (`make up`): no agent container can reach the mock.
 
-Both agents are checked: `agent` and its fake-model twin `agent-e2e` (`make test-e2e`).
+Every agent is checked: `agent`, its fake-model twin `agent-e2e` and the eval agent
+`agent-eval` (`make test-e2e` starts both).
 """
 
 import subprocess
@@ -12,12 +13,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = pytest.mark.e2e
 
-AGENTS = pytest.mark.parametrize("agent", ["agent", "agent-e2e"])
+AGENTS = pytest.mark.parametrize("agent", ["agent", "agent-e2e", "agent-eval"])
 
 
 def _python_in(service: str, code: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["docker", "compose", "--profile", "e2e", "exec", "-T", service, "python", "-c", code],
+        ["docker", "compose", "--profile", "e2e", "--profile", "eval", "exec", "-T", service,
+         "python", "-c", code],
         cwd=ROOT, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 

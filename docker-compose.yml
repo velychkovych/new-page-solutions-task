@@ -139,6 +139,47 @@ services:
       <<: *healthcheck
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
 
+  # The eval twin of `agent` (profile `eval`, started by `python -m evals.run`): the same
+  # image, command and model settings, real model key included, but its own port, data
+  # volume and TRACES_DIR. The runner resets facts for the seed users and may switch
+  # MODEL_NAME (`--model`), and neither may touch the browser agent.
+  agent-eval:
+    profiles: [eval]
+    image: helpdesk:local
+    command: ["python", "-m", "helpdesk.agent"]
+    environment:
+      <<: *telemetry-env
+      # A subdirectory: two agent processes must not append to the same JSONL file.
+      TRACES_DIR: /app/traces/eval
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: "8080"
+      MCP_URL: http://mcp:8001/mcp
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-anthropic}
+      MODEL_NAME: ${MODEL_NAME:-claude-sonnet-5-5}
+      MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-1024}
+      MODEL_TIMEOUT_S: ${MODEL_TIMEOUT_S:-60}
+      MODEL_MAX_RETRIES: ${MODEL_MAX_RETRIES:-2}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AWS_REGION: ${AWS_REGION:-}
+      CHECKPOINT_DB_PATH: /app/data/checkpoints.sqlite
+      STORE_DB_PATH: /app/data/store.sqlite
+      RECURSION_LIMIT: ${RECURSION_LIMIT:-25}
+      TURN_DEADLINE_S: ${TURN_DEADLINE_S:-90}
+      JAEGER_UI_URL: ${JAEGER_UI_URL:-}
+      WEB_DIR: /app/web
+    volumes:
+      - agent_eval_data:/app/data
+      - ./traces:/app/traces
+    networks: [agent_net]
+    ports: ["127.0.0.1:8082:8080"]
+    stop_grace_period: 100s  # as for `agent`
+    depends_on:
+      mcp: {condition: service_healthy}
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+
   jaeger:
     profiles: [observability]
     image: jaegertracing/jaeger:2.22.0
@@ -159,3 +200,4 @@ volumes:
   mock_data: {}
   agent_data: {}
   agent_e2e_data: {}
+  agent_eval_data: {}

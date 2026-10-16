@@ -2,6 +2,9 @@
 SHELL := /bin/bash
 
 REPEATS ?= 3
+# Optional: `make eval MODEL=claude-haiku-5-5` runs agent-eval with that model.
+MODEL ?=
+EVAL_MODEL_FLAG := $(if $(MODEL),--model $(MODEL))
 # Moderate chaos for the demo recording; override with `make chaos-on CHAOS_BODY='{...}'`.
 CHAOS_BODY ?= {"enabled":true,"rate_limit_rate":0.2,"error_rate":0.2,"slow_rate":0.1,"slow_ms":3000,"seed":42}
 
@@ -38,21 +41,21 @@ typecheck: ## mypy --strict on src/
 test: ## Unit + integration tests (no docker stack needed)
 	uv run pytest tests/unit tests/integration
 
-test-e2e: ## End-to-end tests; requires `make up`. Starts agent-e2e (fake model) on :8081
-	$(COMPOSE_UP_ENV) docker compose $(COMPOSE_PROFILES_FLAG) --profile e2e up -d --wait agent-e2e
+test-e2e: ## End-to-end tests; requires `make up`. Starts agent-e2e (fake model) on :8081 and agent-eval
+	$(COMPOSE_UP_ENV) docker compose $(COMPOSE_PROFILES_FLAG) --profile e2e --profile eval up -d --wait agent-e2e agent-eval
 	uv run pytest -m e2e tests/e2e
 
 up: ## Build and start the stack (OBS=1 adds Jaeger on http://localhost:16686)
 	$(COMPOSE_UP_ENV) docker compose $(COMPOSE_PROFILES_FLAG) up -d --build --wait
 
-down: ## Stop the stack (including Jaeger and agent-e2e)
-	docker compose --profile observability --profile e2e down
+down: ## Stop the stack (including Jaeger, agent-e2e and agent-eval)
+	docker compose --profile observability --profile e2e --profile eval down
 
-eval: ## Live evals with a real model, REPEATS=3 by default -> evals/results/latest.md
-	uv run python -m evals.run --repeats $(REPEATS)
+eval: ## Live evals (agent-eval on :8082, real model), REPEATS=3 -> evals/results/latest.md
+	uv run python -m evals.run --repeats $(REPEATS) $(EVAL_MODEL_FLAG)
 
-eval-chaos: ## Chaos-only eval cases
-	uv run python -m evals.run --repeats $(REPEATS) --chaos
+eval-chaos: ## Chaos-only live eval cases
+	uv run python -m evals.run --repeats $(REPEATS) --chaos $(EVAL_MODEL_FLAG)
 
 seed: ## Reset the mock database to the seed tickets
 	docker compose exec mock python -m helpdesk.mock.seed --reset

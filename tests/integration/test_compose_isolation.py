@@ -16,8 +16,9 @@ import pytest
 from helpdesk.shared.settings import Settings
 
 ROOT = Path(__file__).resolve().parents[2]
-# Both agents: the browser one and the fake-model one the e2e tests use (profile e2e).
-AGENTS = ("agent", "agent-e2e")
+# Every agent: the browser one, the fake-model one the e2e tests use (profile e2e) and the
+# one the live evals use (profile eval).
+AGENTS = ("agent", "agent-e2e", "agent-eval")
 
 pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed")
 
@@ -29,7 +30,7 @@ def compose() -> dict[str, Any]:
     out = subprocess.run(
         [
             "docker", "compose", "--env-file", os.devnull, "--profile", "observability",
-            "--profile", "e2e", "config", "--format", "json",
+            "--profile", "e2e", "--profile", "eval", "config", "--format", "json",
         ],
         cwd=ROOT, env=env, capture_output=True, text=True, check=True,
     )  # fmt: skip
