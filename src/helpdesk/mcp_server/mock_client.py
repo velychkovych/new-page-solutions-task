@@ -1,7 +1,7 @@
 """HTTP client for the mock ticketing API (CONTRACTS.md §1, §2.2, §2.6).
 
 Every request goes through `call_with_retry`, the only retry layer. Failures leave this
-module as `ToolCallError`; success values are the shared wire models.
+module as `ToolCallError` (see `.errors`); success values are the shared wire models.
 """
 
 import asyncio
@@ -14,23 +14,23 @@ from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
 from helpdesk.mcp_server.errors import (
-    WRITE_NOT_CONFIRMED_NEXT_STEP,
-    ToolCallError,
+    deadline_exceeded,
     error_for_status,
     malformed_response,
+    upstream_unavailable,
 )
 from helpdesk.mcp_server.retry import (
     Clock,
     DeadlineExceededError,
     OnRetry,
     RetryPolicy,
+    RetryResult,
     Sleep,
     Uniform,
     UpstreamUnavailableError,
     call_with_retry,
 )
 from helpdesk.shared import trace_attributes as attr
-from helpdesk.shared.errors import ErrorCode
 from helpdesk.shared.settings import Settings
 from helpdesk.shared.tickets import (
     IDEMPOTENCY_KEY_HEADER,
@@ -88,12 +88,12 @@ class MockApiClient:
         params.extend(("status", status.value) for status in args.status or ())
         if args.cursor is not None:
             params.append(("cursor", args.cursor))
-        response = await self._send("GET", "/tickets", on_retry=on_retry, params=params)
-        return _parse(response, SearchResult)
+        result = await self._send("GET", "/tickets", on_retry=on_retry, params=params)
+        return _parse(result, SearchResult)
 
     async def get_ticket(self, args: GetTicketArgs, on_retry: OnRetry) -> Ticket:
-        response = await self._send("GET", f"/tickets/{args.ticket_id}", on_retry=on_retry)
-        return _parse(response, Ticket, ticket_id=args.ticket_id)
+        result = await self._send("GET", f"/tickets/{args.ticket_id}", on_retry=on_retry)
+        return _parse(result, Ticket, ticket_id=args.ticket_id)
 
     async def create_ticket(self, args: CreateTicketInput, on_retry: OnRetry) -> Ticket:
         body = CreateTicketRequest(
@@ -103,25 +103,25 @@ class MockApiClient:
             priority=args.priority,
             reporter_id=args.reporter_id,
         )
-        response = await self._send(
+        result = await self._send(
             "POST",
             "/tickets",
             on_retry=on_retry,
             body=body,
             idempotency_key=args.idempotency_key,
         )
-        return _parse(response, Ticket, write=True)
+        return _parse(result, Ticket)
 
     async def add_comment(self, args: AddCommentInput, on_retry: OnRetry) -> CommentCreated:
         body = AddCommentRequest(author_id=args.author_id, body=args.body)
-        response = await self._send(
+        result = await self._send(
             "POST",
             f"/tickets/{args.ticket_id}/comments",
             on_retry=on_retry,
             body=body,
             idempotency_key=args.idempotency_key,
         )
-        return _parse(response, CommentCreated, ticket_id=args.ticket_id, write=True)
+        return _parse(result, CommentCreated, ticket_id=args.ticket_id)
 
     async def _send(
         self,
@@ -132,7 +132,7 @@ class MockApiClient:
         params: QueryItems | None = None,
         body: BaseModel | None = None,
         idempotency_key: str | None = None,
-    ) -> httpx.Response:
+    ) -> RetryResult:
         # The key the agent sent is forwarded unchanged on every attempt, so a retried
         # write is a replay at the mock, never a second write.
         headers = {} if idempotency_key is None else {IDEMPOTENCY_KEY_HEADER: idempotency_key}
@@ -144,7 +144,6 @@ class MockApiClient:
             )
 
         span = trace.get_current_span()
-        is_write = method == "POST"
         try:
             result = await call_with_retry(
                 attempt,
@@ -156,30 +155,19 @@ class MockApiClient:
             )
         except DeadlineExceededError as exc:
             span.set_attribute(attr.TOOL_ATTEMPTS, exc.attempts)
-            raise ToolCallError(
-                ErrorCode.TIMEOUT,
-                f"The ticketing system did not answer within {self._policy.deadline_s:g} s",
-                WRITE_NOT_CONFIRMED_NEXT_STEP if is_write else None,
-            ) from exc
+            raise deadline_exceeded(exc, self._policy.deadline_s) from exc
         except UpstreamUnavailableError as exc:
             span.set_attribute(attr.TOOL_ATTEMPTS, exc.attempts)
-            raise ToolCallError(
-                ErrorCode.UPSTREAM_UNAVAILABLE,
-                f"The ticketing system is unavailable after {exc.attempts} attempt(s)",
-                WRITE_NOT_CONFIRMED_NEXT_STEP if is_write else None,
-            ) from exc
+            raise upstream_unavailable(exc) from exc
         span.set_attribute(attr.TOOL_ATTEMPTS, result.attempts)
-        return result.response
+        return result
 
 
-def _parse[M: BaseModel](
-    response: httpx.Response, model: type[M], *, ticket_id: str | None = None, write: bool = False
-) -> M:
+def _parse[M: BaseModel](result: RetryResult, model: type[M], *, ticket_id: str | None = None) -> M:
+    response = result.response
     if not response.is_success:
-        raise error_for_status(response, ticket_id=ticket_id)
+        raise error_for_status(response, attempts=result.attempts, ticket_id=ticket_id)
     try:
         return model.model_validate_json(response.content)
     except ValidationError as exc:
-        raise malformed_response(
-            response.status_code, WRITE_NOT_CONFIRMED_NEXT_STEP if write else None
-        ) from exc
+        raise malformed_response(response.status_code, attempts=result.attempts) from exc

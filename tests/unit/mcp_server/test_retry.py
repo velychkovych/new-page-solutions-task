@@ -161,6 +161,48 @@ async def test_retries_stop_at_3_attempts(clock: FakeClock, uniform: RecordingUn
     assert len(clock.sleeps) == 2
 
 
+@pytest.mark.parametrize(
+    ("outcomes", "last_status", "last_failure"),
+    [
+        ([response(503)] * 3, 503, None),
+        (
+            [response(503), response(503), httpx.ConnectError("RAW refused")],
+            None,
+            "could not connect",
+        ),
+        (
+            [httpx.ConnectError("x"), httpx.ConnectError("x"), httpx.ReadTimeout("RAW")],
+            None,
+            "timed out",
+        ),
+        ([httpx.ConnectError("x"), httpx.ConnectError("x"), response(429)], 429, None),
+        ([httpx.RemoteProtocolError("RAW bad framing")], None, "failed with RemoteProtocolError"),
+    ],
+    ids=["503", "connect-error", "read-timeout", "failure-then-429", "protocol-error"],
+)
+async def test_unavailable_says_how_the_last_attempt_failed(
+    outcomes: list[Outcome],
+    last_status: int | None,
+    last_failure: str | None,
+    clock: FakeClock,
+    uniform: RecordingUniform,
+) -> None:
+    """Only our wording and the exception type, never its message (which is upstream's)."""
+    with pytest.raises(UpstreamUnavailableError) as caught:
+        await run(ScriptedSend(clock, outcomes), clock, uniform)
+    assert (caught.value.last_status, caught.value.last_failure) == (last_status, last_failure)
+
+
+async def test_deadline_says_how_the_last_attempt_failed(
+    clock: FakeClock, uniform: RecordingUniform
+) -> None:
+    policy = POLICY.model_copy(update={"deadline_s": 4.0, "attempt_timeout_s": 5.0})
+    send = ScriptedSend(clock, [httpx.ReadTimeout("slow")])
+    with pytest.raises(DeadlineExceededError) as caught:
+        await run(send, clock, uniform, policy=policy)
+    assert (caught.value.attempts, caught.value.last_failure) == (1, "timed out")
+
+
 @pytest.mark.parametrize("fraction", [0.0, 0.37, 1.0])
 async def test_full_jitter_wait_bounds(fraction: float, clock: FakeClock) -> None:
     uniform = RecordingUniform(fraction)

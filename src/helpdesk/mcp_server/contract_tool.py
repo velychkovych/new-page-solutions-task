@@ -13,6 +13,7 @@ every constraint (patterns, lengths, enums, bounds).
 import json
 import logging
 import time
+import traceback
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -23,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 from opentelemetry.trace import Span, Status, StatusCode, Tracer
 from pydantic import BaseModel, ValidationError, create_model
 
-from helpdesk.mcp_server.errors import ToolCallError, invalid_arguments, unexpected_failure
+from helpdesk.mcp_server.errors import ToolCallError, internal_error, invalid_arguments
 from helpdesk.mcp_server.redaction import SecretRedactor, truncate_utf8
 from helpdesk.mcp_server.retry import OnRetry
 from helpdesk.shared import trace_attributes as attr
@@ -88,15 +89,23 @@ class ToolRunner[A: BaseModel]:
     ) -> CallToolResult:
         started = time.perf_counter()
         with self._tracer.start_as_current_span(
-            attr.SPAN_TOOL, attributes={attr.TOOL_NAME: self.name, attr.TOOL_ATTEMPTS: 0}
+            attr.SPAN_TOOL,
+            attributes={attr.TOOL_NAME: self.name, attr.TOOL_ATTEMPTS: 0},
         ) as span:
-            # The injected ids and the idempotency key are not secrets, so they stay in the
-            # span for debugging; the redactor still guarantees no secret value does.
-            span.set_attribute(
-                attr.TOOL_ARGS,
-                self._redact(json.dumps(arguments, separators=(",", ":"), default=str)),
-            )
-            result = await self._run(arguments, context, span)
+            try:
+                # The injected ids and the idempotency key are not secrets, so they stay
+                # in the span for debugging; the redactor still guarantees no secret does.
+                span.set_attribute(
+                    attr.TOOL_ARGS,
+                    self._redact(json.dumps(arguments, separators=(",", ":"), default=str)),
+                )
+                result = await self._run(arguments, context, span)
+            except Exception as exc:
+                # Last resort for a bug anywhere above. Without it the low-level server
+                # returns str(exc) as the tool text, which breaks the error contract and
+                # may carry upstream bytes or a secret.
+                self._log_unexpected(exc)
+                result = self._fail(span, internal_error())
         logger.info(
             "tool %s finished: %s in %d ms",
             self.name,
@@ -115,22 +124,23 @@ class ToolRunner[A: BaseModel]:
             args = self.input_model.model_validate_json(json.dumps(arguments), strict=True)
         except ValidationError as exc:
             # Validated here, so the mock is never called with bad arguments.
-            return self._fail(span, invalid_arguments(self.name, exc))
+            return self._fail(span, invalid_arguments(self.name, self.input_model, exc))
         try:
             value = await self._handler(args, retry_progress(context))
         except ToolCallError as exc:
             return self._fail(span, exc)
-        except Exception as exc:
-            # Last resort. Without it the low-level server returns str(exc) as the tool
-            # text, which breaks the error contract and may carry upstream bytes.
-            logger.error("tool %s failed unexpectedly: %s", self.name, type(exc).__name__)
-            return self._fail(span, unexpected_failure(self.name))
         text = self._redact(value.model_dump_json())
         span.set_attribute(attr.TOOL_RESULT, truncate_utf8(text, self._result_max_bytes))
         return text_result(text, is_error=False)
 
+    def _log_unexpected(self, exc: Exception) -> None:
+        # The traceback is for whoever fixes the bug; it stays in this server's log, with
+        # every known secret replaced, and never reaches the model or the span.
+        details = self._redact("".join(traceback.format_exception(exc)))
+        logger.error("tool %s failed with an unexpected error:\n%s", self.name, details)
+
     def _fail(self, span: Span, error: ToolCallError) -> CallToolResult:
-        text = self._redact(error.text)
+        text = self._redact(error.text(self.name))
         span.set_attribute(attr.TOOL_ERROR_CODE, error.code.value)
         span.set_attribute(attr.TOOL_RESULT, truncate_utf8(text, self._result_max_bytes))
         span.set_status(Status(StatusCode.ERROR, error.code.value))

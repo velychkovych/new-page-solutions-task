@@ -71,10 +71,21 @@ class RetryResult:
 
 
 class UpstreamCallError(Exception):
-    def __init__(self, message: str, *, attempts: int, last_status: int | None) -> None:
+    """`last_status` is the last attempt's HTTP status; `last_failure` says how it failed
+    when there was no response. Both are safe to show: our wording, never upstream bytes."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int,
+        last_status: int | None,
+        last_failure: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.attempts = attempts
         self.last_status = last_status
+        self.last_failure = last_failure
 
 
 class DeadlineExceededError(UpstreamCallError):
@@ -99,6 +110,18 @@ def retry_after_s(response: httpx.Response) -> float | None:
     if not math.isfinite(value) or value < 0:
         return None
     return value
+
+
+def describe_failure(exc: Exception) -> str:
+    """How an attempt without a response failed. Only the exception type is used: its
+    message can carry upstream bytes."""
+    match exc:
+        case httpx.ConnectError():
+            return "could not connect"
+        case httpx.TimeoutException() | TimeoutError():
+            return "timed out"
+        case _:
+            return f"failed with {type(exc).__name__}"
 
 
 def wait_before_attempt(
@@ -150,17 +173,22 @@ async def call_with_retry(
         timeout_s = min(policy.attempt_timeout_s, remaining)
 
         response: httpx.Response | None = None
+        failure: str | None = None
         try:
             async with asyncio.timeout(timeout_s):
                 response = await send(timeout_s)
         except _RETRYABLE_ERRORS as exc:
+            failure = describe_failure(exc)
             logger.debug("attempt %d failed: %s", attempt, type(exc).__name__)
         except httpx.HTTPError as exc:
             # Any other httpx failure (protocol error, bad Content-Encoding, redirect loop)
             # will not get better on retry.
             _record_attempt(attempt, None, 0.0)
             raise UpstreamUnavailableError(
-                f"HTTP error: {type(exc).__name__}", attempts=attempt, last_status=None
+                f"HTTP error: {type(exc).__name__}",
+                attempts=attempt,
+                last_status=None,
+                last_failure=describe_failure(exc),
             ) from exc
 
         status = None if response is None else response.status_code
@@ -171,18 +199,27 @@ async def call_with_retry(
         if clock() >= deadline:
             _record_attempt(attempt, status, 0.0)
             raise DeadlineExceededError(
-                "deadline reached during an attempt", attempts=attempt, last_status=status
+                "deadline reached during an attempt",
+                attempts=attempt,
+                last_status=status,
+                last_failure=failure,
             )
         if attempt >= policy.max_attempts:
             _record_attempt(attempt, status, 0.0)
             raise UpstreamUnavailableError(
-                "retry attempts exhausted", attempts=attempt, last_status=status
+                "retry attempts exhausted",
+                attempts=attempt,
+                last_status=status,
+                last_failure=failure,
             )
         wait_s = wait_before_attempt(attempt + 1, response, policy, uniform)
         if clock() + wait_s >= deadline:
             _record_attempt(attempt, status, 0.0)
             raise DeadlineExceededError(
-                "the next wait would end after the deadline", attempts=attempt, last_status=status
+                "the next wait would end after the deadline",
+                attempts=attempt,
+                last_status=status,
+                last_failure=failure,
             )
 
         _record_attempt(attempt, status, wait_s)

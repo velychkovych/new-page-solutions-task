@@ -93,8 +93,11 @@ async def test_unexpected_failure_span_has_error_code(
 
     span = only_tool_span(span_exporter)
     attributes = dict(span.attributes or {})
-    assert attributes[attr.TOOL_ERROR_CODE] == "UPSTREAM_UNAVAILABLE"
+    assert attributes[attr.TOOL_ERROR_CODE] == "INTERNAL"
+    assert str(attributes[attr.TOOL_RESULT]).startswith("ERROR INTERNAL: ")
     assert "RAW-UPSTREAM" not in str(attributes[attr.TOOL_RESULT])
+    # The exception is caught, so it is not recorded on the span with its message.
+    assert not span.events
     assert span.status.status_code is StatusCode.ERROR
 
 
