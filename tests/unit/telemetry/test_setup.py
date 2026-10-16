@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -152,6 +153,37 @@ def test_setup_refuses_when_another_global_provider_exists(make_settings: Any) -
     with pytest.raises(TelemetryConfigError, match=r"another global tracer provider"):
         setup_telemetry("agent", make_settings())
     foreign.shutdown()
+
+
+def test_a_failed_setup_shuts_down_the_provider_it_built(
+    make_settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[telemetry_setup.Telemetry] = []
+    build = telemetry_setup.build_telemetry
+
+    def build_and_keep(service_name: str, settings: Settings) -> telemetry_setup.Telemetry:
+        built.append(build(service_name, settings))
+        return built[-1]
+
+    def fail() -> None:
+        raise RuntimeError("instrumentation failed")
+
+    monkeypatch.setattr(telemetry_setup, "build_telemetry", build_and_keep)
+    monkeypatch.setattr(telemetry_setup, "_instrument_libraries", fail)
+    before = set(threading.enumerate())
+
+    with pytest.raises(RuntimeError, match="instrumentation failed"):
+        setup_telemetry("agent", make_settings())
+
+    # Otherwise each failed start leaks the batch processor's worker thread and the
+    # JSONL exporter's open file.
+    [telemetry] = built
+    leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+    assert leaked == []
+    span = telemetry.provider.get_tracer("t").start_span("after-failure")
+    span.end()
+    assert not (make_settings().traces_dir / "agent.jsonl").exists()
+    assert PROCESS_TRACER_PROVIDER.delegate is None
 
 
 @pytest.mark.parametrize("name", ["", "Agent", "../etc", "a/b", "x" * 65])
