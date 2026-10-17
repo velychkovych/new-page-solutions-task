@@ -1049,3 +1049,42 @@ No live eval was run and no paid model API was called.
 - Whether the Haiku judge's strictness on derived facts (case 3, step 5) matches what the
   author wants.
 - `make test` now takes about 2 minutes (was ~40 s before Phase 3).
+
+## 2026-10-17 — Phase 4: independent verification
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- A fresh general-purpose subagent with no build context reviewed sha `dd5b97b`: §8
+  traceability, the Phase 1 test lists, the gates, one live `make eval`, and the targeted
+  review (secrets, retry layers, side effects before `interrupt()`, `user_id` source,
+  unbounded history). It wrote `docs/review.md`. No fixes, no commits by the reviewer.
+- Orchestrator: wrote the brief, spot-checked finding 1 in the code, wrote this entry,
+  committed `docs/review.md`.
+
+### Verified, and how
+
+- Gates (reviewer): `make lint` `All checks passed!` / `187 files already formatted`;
+  `make typecheck` `Success: no issues found in 97 source files`; `make test`
+  `1339 passed, 11 warnings in 120.86s`; `make test-e2e` `22 passed in 34.78s`;
+  `make down` run afterwards.
+- `make eval` (agent `claude-sonnet-5-5`, judge `claude-haiku-5-5`, 3 repeats):
+  **33/37 (89%), 2 not exercised, 0 judge errors**; exit 1. Agent tokens 361,181
+  (cache read 320,636); judge tokens 44,240. No safety check failed in any run.
+- Targeted review: no issue found in any of the five areas (details in `docs/review.md` §4).
+- Finding 1 spot-check (orchestrator): `src/helpdesk/agent/proposal.py:61` mints a new
+  idempotency key on every proposal; after an unconfirmed write, the only guard against a
+  second proposal is the next-step text in `src/helpdesk/mcp_server/errors.py:26-32`.
+
+### Deviations from the plan
+
+- None. `evals/results/latest.{md,json}` were overwritten by the review's `make eval` and
+  left uncommitted: the README "Latest results" still shows the Phase 3 run (34/36). The
+  author chooses which run to keep.
+
+### Unsure — author should review
+
+- Findings in `docs/review.md` §5, two medium: (1) a retry after an unconfirmed write gets a
+  new key and can double-apply (CONFIRMED with fakes, PLAUSIBLE live); (2) the pagination
+  case has followed a cursor in 0 of 6 live runs.
+- Not verified: manual browser run with a real model (`docs/screenshots/` is empty),
+  Bedrock/OpenAI live, `make eval-chaos`, the Jaeger profile, a clean-machine setup.
