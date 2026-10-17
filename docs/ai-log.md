@@ -1134,3 +1134,32 @@ No live eval was run and no paid model API was called.
   identical args; this was not measured live.
 - The README case-table row for `pagination_cursor` was regenerated (`evals.run --list`);
   its "Latest results" row and the bullet at README line 378 describe the Phase 3 run.
+
+## 2026-10-17 — Default agent model: claude-sonnet-5-5 → claude-haiku-5-5
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- At the author's request: `Settings.model_name` default, `.env.example`, the local `.env`
+  (gitignored), both `docker-compose.yml` defaults, the model-factory docstring, the
+  default-model tests, and the facts in CONTRACTS §7, README (env table, agent design),
+  AGENTCORE (model row), CLAUDE.md and PLAN.md §1.
+- Left as they were: records of past runs (this log, `docs/review.md`,
+  `evals/results/`, the README "Latest results" table) and tests that use a Sonnet id as
+  data or check the Opus/Sonnet judge JSON fallback.
+
+### Verified, and how
+
+- Installed `langchain-anthropic` (`_assert_valid_model_configuration`) rejects
+  `temperature` only for `claude-fable-5*` and `claude-sonnet-5-5`; for `claude-haiku-5-5`
+  the Claude API rejects non-default sampling values. The no-temperature rule stands; the
+  stated reason was updated.
+- Haiku 5.5's minimum cacheable prefix is 512 tokens, the same as Sonnet 5.5's, so the prompt caching
+  setup is unchanged.
+- `make lint` `All checks passed!`; `make typecheck` `Success: no issues found in 97 source
+  files`; `make test` `1350 passed, 11 warnings in 117.98s`.
+
+### Unsure — author should review
+
+- No effort is set, so the agent now runs at Haiku 5.5's default effort `medium` (Sonnet
+  5.5's default is `high`).
+- No live eval has been run on Haiku as the agent yet. The committed results are Sonnet's.

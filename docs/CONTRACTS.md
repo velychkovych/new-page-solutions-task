@@ -571,8 +571,9 @@ Every field is typed concretely, never `Any`, so the checkpointer can deserialis
   | `openai` | `openai` | `langchain_openai.ChatOpenAI` |
   | `fake` | none (`init_chat_model` has no fake provider) | scripted fake model, from `FAKE_MODEL_SCRIPT` |
 
-- **No `temperature` is passed to any model**, for any provider. The installed
-  `langchain-anthropic` rejects a non-default value for `claude-sonnet-5-5`. `max_tokens`,
+- **No `temperature` is passed to any model**, for any provider. The Claude API rejects a
+  non-default value for `claude-haiku-5-5`, and the installed `langchain-anthropic` rejects
+  one for `claude-sonnet-5-5`. `max_tokens`,
   the request timeout and SDK `max_retries` come from `Settings` (`MODEL_MAX_TOKENS`,
   `MODEL_TIMEOUT_S`, `MODEL_MAX_RETRIES`, shared by the agent's model and the judge).
 - Config is read only through `helpdesk.shared.settings.Settings`. Every field is listed in

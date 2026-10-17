@@ -23,7 +23,7 @@ PLAN.md; the author decides.
 | Conversation state + pending approvals | `AsyncSqliteSaver`, `data/checkpoints.sqlite` | AgentCore Memory or DynamoDB |
 | User facts | LangGraph Store (SQLite), namespace `("users", user_id, "facts")`, 90-day TTL | <!-- HUMAN --> |
 | Traces | OpenTelemetry → `traces/*.jsonl`, optional OTLP → Jaeger | CloudWatch via OTel |
-| Model | Claude API (`MODEL_PROVIDER=anthropic`, `claude-sonnet-5-5`) | Claude on Bedrock (`MODEL_PROVIDER=bedrock`) |
+| Model | Claude API (`MODEL_PROVIDER=anthropic`, `claude-haiku-5-5`) | Claude on Bedrock (`MODEL_PROVIDER=bedrock`) |
 | Network isolation | Two compose networks; agent has no route to the mock | <!-- HUMAN --> |
 
 ## Where it gets difficult

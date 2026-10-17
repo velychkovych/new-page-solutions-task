@@ -76,7 +76,7 @@ services:
       AGENT_PORT: "8080"
       MCP_URL: http://mcp:8001/mcp
       MODEL_PROVIDER: ${MODEL_PROVIDER:-anthropic}
-      MODEL_NAME: ${MODEL_NAME:-claude-sonnet-5-5}
+      MODEL_NAME: ${MODEL_NAME:-claude-haiku-5-5}
       MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-1024}
       MODEL_TIMEOUT_S: ${MODEL_TIMEOUT_S:-60}
       MODEL_MAX_RETRIES: ${MODEL_MAX_RETRIES:-2}
@@ -155,7 +155,7 @@ services:
       AGENT_PORT: "8080"
       MCP_URL: http://mcp:8001/mcp
       MODEL_PROVIDER: ${MODEL_PROVIDER:-anthropic}
-      MODEL_NAME: ${MODEL_NAME:-claude-sonnet-5-5}
+      MODEL_NAME: ${MODEL_NAME:-claude-haiku-5-5}
       MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-1024}
       MODEL_TIMEOUT_S: ${MODEL_TIMEOUT_S:-60}
       MODEL_MAX_RETRIES: ${MODEL_MAX_RETRIES:-2}

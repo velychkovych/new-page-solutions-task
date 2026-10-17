@@ -45,7 +45,7 @@ Out of scope (state these in the README, do not build them):
 |---|---|
 | Language | Python 3.14 (latest stable), `uv` for dependency management, a single `pyproject.toml` |
 | Agent | LangGraph custom `StateGraph` (**not** `create_react_agent`) |
-| Model | **Claude API is the default.** Use `langchain-anthropic` with `MODEL_PROVIDER=anthropic` and `MODEL_NAME=claude-sonnet-5-5`. The model is built through `init_chat_model`, so the provider stays swappable by config (the brief requires this). **No local model.** `bedrock` (Claude on Amazon Bedrock via `init_chat_model` provider `anthropic_bedrock` → `langchain_aws.ChatAnthropicBedrock`, which ties into AGENTCORE.md) and `openai` are supported by config only, with no code changes and no extra test runs. A `fake` provider gives scripted responses for tests. A unit test asserts that the factory builds the correct chat model class for each provider without calling any of them. |
+| Model | **Claude API is the default.** Use `langchain-anthropic` with `MODEL_PROVIDER=anthropic` and `MODEL_NAME=claude-haiku-5-5`. The model is built through `init_chat_model`, so the provider stays swappable by config (the brief requires this). **No local model.** `bedrock` (Claude on Amazon Bedrock via `init_chat_model` provider `anthropic_bedrock` → `langchain_aws.ChatAnthropicBedrock`, which ties into AGENTCORE.md) and `openai` are supported by config only, with no code changes and no extra test runs. A `fake` provider gives scripted responses for tests. A unit test asserts that the factory builds the correct chat model class for each provider without calling any of them. |
 | Checkpointer | `AsyncSqliteSaver` (package `langgraph-checkpoint-sqlite`), SQLite file on disk |
 | Long-term memory | LangGraph Store, SQLite-backed. Namespace `("users", user_id, "facts")`. |
 | MCP | Official `mcp` Python SDK (FastMCP), streamable HTTP transport. The agent connects with `langchain-mcp-adapters`. |
@@ -61,10 +61,10 @@ Out of scope (state these in the README, do not build them):
 **Claude API specifics:**
 
 - `ANTHROPIC_API_KEY` comes from env (`.env`, gitignored). It is listed in `.env.example` with no value.
-- Default model: `claude-sonnet-5-5`, a good balance of tool-use quality, latency and cost for an agent loop. `claude-haiku-5-5` is a config option, and the evals runner can compare both (`--model`).
+- Default model: `claude-haiku-5-5`. `claude-sonnet-5-5` is a config option, and the evals runner can compare both (`--model`).
 - **Prompt caching:** mark the system prompt and tool definitions as cacheable, since they are identical on every turn. Use the cache-control mechanism the installed `langchain-anthropic` supports, and verify it is the current one.
 - Record cache read and write tokens in traces next to input and output tokens.
-- Set `max_tokens` and a request timeout from `Settings`. Do **not** set `temperature` anywhere: the installed `langchain-anthropic` rejects non-default values for `claude-sonnet-5-5`.
+- Set `max_tokens` and a request timeout from `Settings`. Do **not** set `temperature` anywhere: the Claude API rejects non-default values for `claude-haiku-5-5`, and the installed `langchain-anthropic` rejects them for `claude-sonnet-5-5`.
 - The SDK's own retries on 429/529 from the Claude API are allowed. They are the *model* layer, separate from the single *tool* retry layer in the MCP server.
 - Set SDK `max_retries` explicitly in `Settings`. Document this distinction in the README skeleton as a fact.
 - Map Anthropic errors (overloaded, rate limit, auth) to a clean user-facing `error` message and an error span. Never send a raw stack trace to the UI.

@@ -1,8 +1,9 @@
 """The model factory: MODEL_PROVIDER → chat model, JUDGE_MODEL_PROVIDER → eval judge (CONTRACTS §7).
 
 This is the only code path that builds a model. No temperature is passed for any
-provider: the installed langchain-anthropic rejects non-default values for
-claude-sonnet-5-5. Model names only ever come from Settings.
+provider: the Claude API rejects non-default values for claude-haiku-5-5, and the
+installed langchain-anthropic rejects them for claude-sonnet-5-5. Model names only ever
+come from Settings.
 """
 
 from typing import Any

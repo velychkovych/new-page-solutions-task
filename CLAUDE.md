@@ -23,7 +23,7 @@ of truth: if your code and a contract disagree, the code is wrong.
 - **There is one retry layer for tools**, the MCP server's retry module. Don't add a
   LangGraph `RetryPolicy` to tool nodes or retry loops in the agent. Model calls
   use only the Anthropic SDK's built-in retries, configured via `Settings`.
-- **The LLM is the Claude API** (`langchain-anthropic`, default `claude-sonnet-5-5`).
+- **The LLM is the Claude API** (`langchain-anthropic`, default `claude-haiku-5-5`).
   Keep the provider swappable through `init_chat_model`. Never hard-code a
   model name outside `Settings`.
 - **No side effects before `interrupt()`**: the node re-runs on resume.

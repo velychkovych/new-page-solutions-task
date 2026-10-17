@@ -150,7 +150,7 @@ def test_judge_factory_passes_timeout_and_region(make_settings):
 
 
 def test_judge_factory_defaults_to_haiku_and_leaves_the_agent_model_alone(make_settings):
-    settings = make_settings("anthropic")
+    settings = make_settings("anthropic", model_name="claude-sonnet-5-5")
     judge = build_judge_model(settings)
     agent = build_chat_model(settings)
     assert judge.model == "claude-haiku-5-5"

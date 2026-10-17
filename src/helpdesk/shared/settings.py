@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     agent_port: int = 8080
     mcp_url: str = "http://127.0.0.1:8001/mcp"
     model_provider: ModelProvider = ModelProvider.ANTHROPIC
-    model_name: str = "claude-sonnet-5-5"
+    model_name: str = "claude-haiku-5-5"
     model_max_tokens: Annotated[int, Field(ge=1)] = 1_024
     model_timeout_s: PositiveSeconds = 60.0
     # SDK retries for the *model* API (429/529). Tool retries live only in the MCP server.

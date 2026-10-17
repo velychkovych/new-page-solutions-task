@@ -12,7 +12,7 @@ def test_defaults_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MODEL_PROVIDER", raising=False)
     settings = Settings(_env_file=None)
     assert settings.model_provider is ModelProvider.ANTHROPIC
-    assert settings.model_name == "claude-sonnet-5-5"
+    assert settings.model_name == "claude-haiku-5-5"
     assert settings.retry_max_attempts == 3
     assert settings.tool_deadline_s == 15.0
     assert settings.recursion_limit == 25
@@ -37,7 +37,7 @@ def test_judge_model_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.judge_model_provider is ModelProvider.OPENAI
     assert settings.judge_model_name == "some-judge"
     # The agent's model is untouched by the judge settings.
-    assert settings.model_name == "claude-sonnet-5-5"
+    assert settings.model_name == "claude-haiku-5-5"
 
 
 def test_judge_model_rejects_an_unknown_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,5 +108,5 @@ def test_chaos_failure_rates_must_fit_one_draw(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_no_temperature_setting() -> None:
-    # Author's decision: no temperature is set for any model (claude-sonnet-5-5 rejects it).
+    # Author's decision: no temperature is set for any model (claude-haiku-5-5 rejects it).
     assert not [name for name in Settings.model_fields if "temperature" in name]
