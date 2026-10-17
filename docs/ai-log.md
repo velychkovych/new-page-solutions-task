@@ -1088,3 +1088,49 @@ No live eval was run and no paid model API was called.
   case has followed a cursor in 0 of 6 live runs.
 - Not verified: manual browser run with a real model (`docs/screenshots/` is empty),
   Bedrock/OpenAI live, `make eval-chaos`, the Jaeger profile, a clean-machine setup.
+
+## 2026-10-17 — Fixes for the two medium review findings
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- The author chose both designs (key reuse on identical args; tickets in the case setup) and
+  approved the `shared/` and CONTRACTS edits. Claude Code wrote the code and tests.
+- Finding 1 (`445a19b`): `WriteResult` records the model-visible `args`
+  (`shared/approval.py`, defaulted so old checkpoints load). `propose` reuses the key of
+  `last_write` when it failed `UPSTREAM_UNAVAILABLE`/`TIMEOUT`/`INTERNAL` and the new
+  proposal has the same tool and identical args (`agent/proposal.py`
+  `idempotency_key_for`). The unconfirmed-write next-step texts (agent and MCP) now say to
+  re-propose with exactly the same arguments. CONTRACTS §5.2/§5.3 updated.
+- Finding 2 (`7addbe5`): `setup.tickets` in the case format, created through the mock API
+  after the reset with `eval-setup-<n>` keys, left out of the write checks
+  (`evals/driver.py` `case_writes`). `pagination_cursor` adds 13 network tickets: 21
+  matches, the newest (INC-0028) past the first page at any `page_size` (max 20).
+
+### Verified, and how
+
+- New tests: `tests/unit/agent/test_write_retry.py` (9: reuse per unknown-outcome code,
+  new key for other args, definite failure, saved write; decline in between; legacy
+  `WriteResult`); `tests/e2e/test_chaos.py::test_retrying_an_unconfirmed_write_replays_it_instead_of_writing_twice`
+  (chaos seed 1: commit with the response lost, then 503 and 500; retry approved → one
+  write); `tests/unit/evals/test_driver.py` setup-ticket order and write filtering;
+  `tests/integration/evals/test_fake_tier.py` page_size 20 without the cursor now fails.
+- Gates: `make lint` `All checks passed!` / `189 files already formatted`;
+  `make typecheck` `Success: no issues found in 97 source files`; `make test`
+  `1350 passed, 11 warnings in 118.65s`; `make test-e2e` (after `make up` rebuilt the
+  images with finding 1) `23 passed in 33.23s`.
+- Live, `python -m evals.run --case pagination_cursor --repeats 3` (out to a scratch dir,
+  not `evals/results/`): 3/3 pass, 0 not exercised, `cursor_followed` 3/3; 48,194 agent
+  tokens.
+
+### Deviations from the plan
+
+- None beyond the approved contract edits. `evals/results/latest.{md,json}` still hold the
+  Phase 4 review's full run (uncommitted); README "Latest results" still shows Phase 3.
+
+### Unsure — author should review
+
+- A re-proposal with reworded args still gets a new key (by design: the mock answers a
+  reused key with a different body with 409). Only the next-step text steers the model to
+  identical args; this was not measured live.
+- The README case-table row for `pagination_cursor` was regenerated (`evals.run --list`);
+  its "Latest results" row and the bullet at README line 378 describe the Phase 3 run.
