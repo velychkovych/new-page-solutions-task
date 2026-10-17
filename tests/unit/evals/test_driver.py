@@ -30,7 +30,7 @@ from evals.results import Outcome
 from evals.stack import Tier
 from helpdesk.agent.fake_model import ScriptedMessage
 from helpdesk.shared.api import ChatResponse
-from helpdesk.shared.tickets import ChaosConfig, WritesReport
+from helpdesk.shared.tickets import ChaosConfig, CreateTicketRequest, Ticket, WritesReport
 from helpdesk.telemetry.records import SpanRecord
 
 AGENT_URL = "http://agent.test"
@@ -43,6 +43,7 @@ class MemoryStack:
     writes_total: int = 0
     stored: dict[str, dict[str, str]] = field(default_factory=dict)
     scripts: list[list[ScriptedMessage]] = field(default_factory=list)
+    setup_keys: list[str] = field(default_factory=list)
 
     @property
     def tier(self) -> Tier:
@@ -59,14 +60,30 @@ class MemoryStack:
     async def reset_mock(self) -> None:
         self.calls.append("reset")
         self.writes_total = 0
+        self.setup_keys = []
 
     async def set_chaos(self, config: ChaosConfig) -> None:
         self.calls.append(f"chaos:{'on' if config.enabled else 'off'}")
 
-    async def writes(self) -> WritesReport:
-        return WritesReport(
-            total=self.writes_total, by_key={f"k{i}": 1 for i in range(self.writes_total)}
+    async def create_ticket(self, ticket: CreateTicketRequest, idempotency_key: str) -> Ticket:
+        self.calls.append(f"ticket:{idempotency_key}")
+        self.setup_keys.append(idempotency_key)
+        now = "2026-10-17T09:00:00Z"
+        return Ticket.model_validate(
+            {
+                **ticket.model_dump(mode="json"),
+                "id": f"INC-{100 + len(self.setup_keys):04d}",
+                "status": "open",
+                "assignee_team": None,
+                "created_at": now,
+                "updated_at": now,
+                "comments": [],
+            }
         )
+
+    async def writes(self) -> WritesReport:
+        by_key = {f"k{i}": 1 for i in range(self.writes_total)} | dict.fromkeys(self.setup_keys, 1)
+        return WritesReport(total=self.writes_total + len(self.setup_keys), by_key=by_key)
 
     async def facts(self, command: FactsCommand) -> FactsResult:
         self.calls.append(
@@ -193,6 +210,30 @@ async def test_setup_order_and_chaos_off_before_the_final_reads(tmp_path: Path) 
     ]
     assert MODERATE.enabled
     assert not CHAOS_OFF.enabled
+
+
+SETUP_TICKET = {
+    "title": "Network port in reception is dead",
+    "description": "No link on the reception port.",
+    "category": "network",
+    "priority": "low",
+    "reporter_id": "bob",
+}
+
+
+async def test_setup_tickets_come_after_the_reset_and_stay_out_of_the_write_checks(
+    tmp_path: Path,
+) -> None:
+    stack = MemoryStack(tmp_path / "traces")
+    setup = {**APPROVAL_CASE["setup"], "tickets": [SETUP_TICKET, SETUP_TICKET]}
+    case = make_case(**{**APPROVAL_CASE, "setup": setup})
+    async with agent(stack, [proposal(1), approved_write(stack, 2)], []) as client:
+        result = await score(await run_case(case, stack, client, run=1, trace_wait_s=1))
+    assert stack.calls[:4] == ["chaos:off", "reset", "ticket:eval-setup-1", "ticket:eval-setup-2"]
+    # Three writes in the mock; the agent made one, and writes_executed: 1 holds.
+    assert (await stack.writes()).total == 3
+    assert result.reasons == []
+    assert result.passed
 
 
 async def test_a_write_during_the_proposal_turn_fails_the_case(tmp_path: Path) -> None:

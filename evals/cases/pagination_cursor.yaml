@@ -1,21 +1,37 @@
-# Eight seed tickets mention "network" (INC-0001/3/5/6/8/10/14/15). At the default page
-# size of 5 the newest one, INC-0015, is only on page 2, so finding it means following
-# next_cursor.
+# Eight seed tickets mention "network" (INC-0001/3/5/6/8/10/14/15); setup adds 13 more
+# (INC-0016..INC-0028), so 21 match. Search returns matches oldest first and at most 20 per
+# page, so the newest, INC-0028, is on a later page at any page_size: finding it means
+# following next_cursor.
 id: pagination_cursor
-title: Pagination -> the answer is on page 2, the agent follows the cursor
+title: Pagination -> the answer is on a later page, the agent follows the cursor
 plan_case: 4
 user_id: carol
 scenario: >-
-  carol asks which network ticket was opened most recently. Eight tickets match 'network';
-  at the default page size the newest, INC-0015, is on page 2.
+  carol asks which network ticket was opened most recently. 21 tickets match 'network'; at
+  any page size the newest, INC-0028, is not on the first page.
 expected_outcome: >-
-  The agent follows next_cursor to page 2 and names INC-0015 and its status; no write is
-  proposed.
+  The agent follows next_cursor to the last page and names INC-0028 and its status; no write
+  is proposed.
+setup:
+  tickets:
+    - {title: Wi-Fi drops in the network lab, description: Laptops in the network lab lose Wi-Fi every few minutes., category: network, priority: medium, reporter_id: bob}
+    - {title: New starter needs network access, description: A new hire in sales has no network login yet., category: access, priority: medium, reporter_id: alice}
+    - {title: Network cable missing at desk 14, description: Desk 14 has no network cable for the docking station., category: network, priority: low, reporter_id: bob}
+    - {title: Slow network in the canteen, description: Pages take a minute to load on the canteen network., category: network, priority: low, reporter_id: alice}
+    - {title: Network switch in closet 3 beeps, description: The network switch in closet 3 beeps every hour., category: hardware, priority: medium, reporter_id: bob}
+    - {title: Guest network password expired, description: Visitors cannot join the guest network with the posted password., category: network, priority: medium, reporter_id: alice}
+    - {title: Network scanner not found, description: The scanner on floor 1 no longer shows up on the network., category: hardware, priority: low, reporter_id: bob}
+    - {title: Network drive quota full, description: The team network drive says it is full., category: software, priority: medium, reporter_id: alice}
+    - {title: Network latency to the US office, description: Calls to the US office lag on the office network., category: network, priority: medium, reporter_id: bob}
+    - {title: Network port in reception is dead, description: The network port behind the reception desk gives no link., category: network, priority: low, reporter_id: alice}
+    - {title: Network login slow on Mondays, description: Logging in to the network takes ten minutes on Monday mornings., category: network, priority: low, reporter_id: bob}
+    - {title: Smart TV in room 4A cannot join the network, description: The meeting room TV in 4A cannot join the network., category: network, priority: low, reporter_id: alice}
+    - {title: Conference room display drops off the network, description: The display in the big conference room drops off the network during calls., category: network, priority: high, reporter_id: bob}
 turns:
   - message: Which network ticket was opened most recently, and what's its status?
     expect:
       status: ok
-      reply_matches: INC-0015
+      reply_matches: INC-0028
 expect:
   tools_called_in_order_contains: [search_tickets]
   # Implies a second search_tickets call (the cursor comes from the first). A run whose
@@ -29,11 +45,11 @@ expect:
 fake:
   - - tool_calls:
         - name: search_tickets
-          args: {query: network}
+          args: {query: network, page_size: 20}
     - tool_calls:
         - name: search_tickets
-          # next_cursor of page 1 for q="network" (tests/unit/evals checks it).
-          args: {query: network, cursor: eyJvIjo1LCJmIjoiY2NiY2I2MTI3YzNmOWY3NyJ9}
+          # next_cursor of the first page of 20 for q="network" (tests/unit/evals checks it).
+          args: {query: network, page_size: 20, cursor: eyJvIjoyMCwiZiI6ImNjYmNiNjEyN2MzZjlmNzcifQ}
     - content: >-
-        The most recent network ticket is INC-0015, "Firewall blocks the new CRM site".
-        Its status is open, with high priority.
+        The most recent network ticket is INC-0028, "Conference room display drops off the
+        network". Its status is open, with high priority.

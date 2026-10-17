@@ -20,7 +20,7 @@ from evals import facts_command, mock_command
 from evals.facts_command import FactsCommand, FactsResult
 from evals.stack import ROOT, StackError, Tier, checked, run_command
 from helpdesk.agent.fake_model import ScriptedMessage
-from helpdesk.shared.tickets import ChaosConfig, WritesReport
+from helpdesk.shared.tickets import ChaosConfig, CreateTicketRequest, Ticket, WritesReport
 
 SERVICE = "agent-eval"
 PROFILE = "eval"
@@ -123,15 +123,16 @@ class LiveStack:
                 raise StackError(f"{SERVICE} is not healthy at {AGENT_URL}")
             await asyncio.sleep(0.5)
 
-    async def _mock(self, method: str, path: str, body: str = "") -> object:
+    async def _mock(
+        self, method: str, path: str, body: str = "", *, key: str = "", expected: int = 200
+    ) -> object:
+        command = ("python", "-c", _MOCK_SOURCE, method, path, body, *((key,) if key else ()))
         out = checked(
-            await run_command(
-                compose_args("exec", "-T", "mock", "python", "-c", _MOCK_SOURCE, method, path, body)
-            ),
+            await run_command(compose_args("exec", "-T", "mock", *command)),
             f"mock {method} {path}",
         )
         reply = json.loads(out)
-        if reply.get("status") != 200:
+        if reply.get("status") != expected:
             raise StackError(f"mock {method} {path} returned {reply.get('status')}")
         return reply.get("body")
 
@@ -145,6 +146,11 @@ class LiveStack:
 
     async def set_chaos(self, config: ChaosConfig) -> None:
         await self._mock("POST", "/admin/chaos", config.model_dump_json())
+
+    async def create_ticket(self, ticket: CreateTicketRequest, idempotency_key: str) -> Ticket:
+        body = ticket.model_dump_json()
+        created = await self._mock("POST", "/tickets", body, key=idempotency_key, expected=201)
+        return Ticket.model_validate(created)
 
     async def writes(self) -> WritesReport:
         return WritesReport.model_validate(await self._mock("GET", "/admin/writes"))

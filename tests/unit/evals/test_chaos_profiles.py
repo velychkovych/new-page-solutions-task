@@ -77,7 +77,7 @@ def test_all_5xx_fails_every_request_with_a_server_error() -> None:
     assert outcomes <= {ChaosOutcome.SERVER_ERROR, ChaosOutcome.SERVICE_UNAVAILABLE}
 
 
-def test_the_pagination_case_script_carries_the_real_page_2_cursor() -> None:
+def test_the_pagination_case_script_carries_the_real_second_page_cursor() -> None:
     (case,) = [c for c in load_cases() if c.id == "pagination_cursor"]
     second_search = case.fake[0][1].tool_calls[0]
-    assert second_search.args["cursor"] == encode_cursor(5, SearchFilter.build("network", []))
+    assert second_search.args["cursor"] == encode_cursor(20, SearchFilter.build("network", []))

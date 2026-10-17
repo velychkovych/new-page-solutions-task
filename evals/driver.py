@@ -1,9 +1,10 @@
 """Run one case against a stack: set it up, send its turns over HTTP, collect the evidence.
 The checks run afterwards, as DeepEval metrics (evals.scoring).
 
-Between cases: chaos off, mock reset, the facts of every user the case touches cleared,
-the case's facts set, then its chaos. Every run gets fresh session ids. Chaos is turned
-off again before the final reads, since GET /tickets is subject to chaos (/admin/* is not).
+Between cases: chaos off, mock reset, the case's setup tickets created, the facts of every
+user the case touches cleared, the case's facts set, then its chaos. Every run gets fresh
+session ids. Chaos is turned off again before the final reads, since GET /tickets is
+subject to chaos (/admin/* is not).
 """
 
 import time
@@ -21,9 +22,12 @@ from evals.results import TurnResult
 from evals.stack import Stack, StackError
 from evals.traces import TRACE_WAIT_S, TokenUsage, TraceIncompleteError, wait_for_trace
 from helpdesk.shared.api import ChatRequest, ChatResponse, Decision, PendingActionView
+from helpdesk.shared.tickets import WritesReport
 
 # Longer than the agent's 90 s turn deadline, so the agent's own deadline reply arrives.
 TURN_TIMEOUT_S = 150.0
+# The agent's keys are uuid4s, so these never collide with a write the agent made.
+SETUP_KEY_PREFIX = "eval-setup-"
 
 
 class CaseFailedError(Exception):
@@ -34,9 +38,22 @@ def new_session_id(case_id: str, label: str) -> str:
     return f"ev-{case_id}-{label}-{uuid.uuid4().hex[:8]}"
 
 
+def setup_key(index: int) -> str:
+    return f"{SETUP_KEY_PREFIX}{index}"
+
+
+def case_writes(report: WritesReport) -> WritesReport:
+    """The writes the agent made: the case's setup tickets are left out."""
+    by_key = {k: n for k, n in report.by_key.items() if not k.startswith(SETUP_KEY_PREFIX)}
+    setup = sum(n for k, n in report.by_key.items() if k.startswith(SETUP_KEY_PREFIX))
+    return WritesReport(total=report.total - setup, by_key=by_key)
+
+
 async def prepare(case: Case, stack: Stack) -> None:
     await stack.set_chaos(CHAOS_OFF)
     await stack.reset_mock()
+    for index, ticket in enumerate(case.setup.tickets, start=1):
+        await stack.create_ticket(ticket, setup_key(index))
     await stack.facts(FactsCommand(clear=sorted(case.users), set=case.setup.facts))
     await stack.set_chaos(resolve_chaos(case.setup.chaos))
 
@@ -199,7 +216,7 @@ async def run_case(
         await prepare(case, stack)
         await _run_turns(case, stack, client, progress, trace_wait_s)
         await stack.set_chaos(CHAOS_OFF)
-        writes = await stack.writes()
+        writes = case_writes(await stack.writes())
         readers = sorted(set(case.expect.facts) | set(case.expect.no_facts_for))
         facts = (await stack.facts(FactsCommand(read=readers))).facts if readers else {}
         evidence = CaseEvidence(case=case, turns=progress.turns, writes=writes, facts=facts)

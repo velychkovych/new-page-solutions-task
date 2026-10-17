@@ -16,7 +16,7 @@ from typing import Protocol
 
 from evals.facts_command import FactsCommand, FactsResult
 from helpdesk.agent.fake_model import ScriptedMessage
-from helpdesk.shared.tickets import ChaosConfig, WritesReport
+from helpdesk.shared.tickets import ChaosConfig, CreateTicketRequest, Ticket, WritesReport
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMAND_TIMEOUT_S = 120.0
@@ -109,6 +109,9 @@ class Stack(Protocol):
         """Back to the seed tickets, with no idempotency records and no write counts."""
 
     async def set_chaos(self, config: ChaosConfig) -> None: ...
+
+    async def create_ticket(self, ticket: CreateTicketRequest, idempotency_key: str) -> Ticket:
+        """A case's setup ticket, through the mock's REST API."""
 
     async def writes(self) -> WritesReport: ...
 

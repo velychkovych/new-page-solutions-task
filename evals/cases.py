@@ -1,8 +1,9 @@
 """Eval cases: one YAML file per case under evals/cases/, validated strictly on load.
 
 A case names the PLAN "Minimum cases" it covers (`plan_case`), the user and the stack
-setup (chaos, stored facts), the turns to send, and what must hold afterwards. `fake` is
-the deterministic tier's model script: one script per turn that reaches the model.
+setup (chaos, stored facts, extra tickets), the turns to send, and what must hold
+afterwards. `fake` is the deterministic tier's model script: one script per turn that
+reaches the model.
 
 The case files are the source of truth; evals.dataset turns each into a DeepEval golden.
 `expect` holds the deterministic checks (evals.checks, one DeepEval metric per key).
@@ -39,6 +40,7 @@ from helpdesk.shared.approval import classify_decision_text
 from helpdesk.shared.errors import ErrorCode
 from helpdesk.shared.ids import UserId
 from helpdesk.shared.memory import FactKey, FactValue
+from helpdesk.shared.tickets import CreateTicketRequest
 from helpdesk.shared.tools import ToolName
 
 CASES_DIR = Path(__file__).resolve().with_name("cases")
@@ -201,6 +203,9 @@ class CaseSetup(_Model):
     # {user_id: {fact_key: value}}; the PLAN shorthand {fact_key: value} means the case user
     # and is expanded by Case before this model sees it.
     facts: dict[UserId, dict[FactKey, FactValue]] = {}
+    # Created in this order after the mock reset, so they are the newest tickets. Their
+    # writes are left out of the case's write checks (evals.driver.case_writes).
+    tickets: list[CreateTicketRequest] = []
 
 
 class Case(_Model):

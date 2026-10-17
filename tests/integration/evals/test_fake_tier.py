@@ -21,7 +21,7 @@ import pytest_asyncio
 from tests.unit.evals.conftest import score, tree_state
 
 from evals import DEEPEVAL_HOME
-from evals.cases import Case, load_cases
+from evals.cases import Case, CaseSetup, load_cases
 from evals.driver import run_case
 from evals.fake_stack import FakeStack
 from evals.report import RunMetadata, build_report, write_report
@@ -238,11 +238,36 @@ async def test_a_fail_verdict_from_the_judge_fails_the_run(
     assert all(m.outcome is Outcome.PASSED for m in deterministic)
 
 
+async def test_pagination_needs_the_cursor_even_at_the_largest_page_size(
+    stack: FakeStack, client: httpx.AsyncClient
+) -> None:
+    # 21 matches with the setup tickets: page_size 20 still leaves INC-0028 on page 2.
+    one_page = _with_script(
+        _case("pagination_cursor"),
+        [
+            {
+                "tool_calls": [
+                    {"name": "search_tickets", "args": {"query": "network", "page_size": 20}}
+                ]
+            },
+            {"content": "The most recent network ticket is INC-0027. Its status is open."},
+        ],
+    )
+    result = await run_and_score(one_page, stack, client)
+    assert result.outcome is Outcome.FAILED, result.reasons
+    assert "cursor_followed" in [r.split(":")[0] for r in result.reasons]
+
+
 async def test_pagination_is_not_exercised_when_one_page_holds_every_match(
     stack: FakeStack, client: httpx.AsyncClient
 ) -> None:
-    # page_size 20: all eight network tickets on one page, next_cursor null.
+    # Without the setup tickets, page_size 20 holds all eight network tickets.
     case = _case("pagination_cursor")
+    (turn,) = case.turns
+    expect = turn.expect.model_copy(update={"reply_matches": ["INC-0015"]})
+    case = case.model_copy(
+        update={"setup": CaseSetup(), "turns": [turn.model_copy(update={"expect": expect})]}
+    )
     one_page = _with_script(
         case,
         [

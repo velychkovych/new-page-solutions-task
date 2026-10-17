@@ -28,7 +28,13 @@ from evals.facts_command import FactsCommand, FactsResult
 from evals.stack import StackError, Tier, checked, mask_secrets, run_command
 from helpdesk.agent.fake_model import ScriptedMessage
 from helpdesk.mock.seed import seed_database
-from helpdesk.shared.tickets import ADMIN_TOKEN_HEADER, ChaosConfig, WritesReport
+from helpdesk.shared.tickets import (
+    ADMIN_TOKEN_HEADER,
+    ChaosConfig,
+    CreateTicketRequest,
+    Ticket,
+    WritesReport,
+)
 
 STARTUP_TIMEOUT_S = 30.0
 STOP_TIMEOUT_S = 20.0
@@ -217,6 +223,23 @@ class FakeStack:
 
     async def set_chaos(self, config: ChaosConfig) -> None:
         await self._admin("POST", "/admin/chaos", config.model_dump_json())
+
+    async def create_ticket(self, ticket: CreateTicketRequest, idempotency_key: str) -> Ticket:
+        try:
+            response = await self._client.post(
+                self._services["mock"].url + "/tickets",
+                content=ticket.model_dump_json(),
+                headers={
+                    **self._headers(),
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": idempotency_key,
+                },
+            )
+        except httpx.TransportError as exc:
+            raise StackError(f"mock POST /tickets: {type(exc).__name__}") from exc
+        if response.status_code != 201:
+            raise StackError(f"mock POST /tickets returned {response.status_code}")
+        return Ticket.model_validate_json(response.content)
 
     async def writes(self) -> WritesReport:
         return WritesReport.model_validate(await self._admin("GET", "/admin/writes"))

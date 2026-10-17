@@ -1,4 +1,5 @@
-"""One request to the mock, run inside the mock container: `python -c <this file> METHOD PATH BODY`.
+"""One request to the mock, run inside the mock container:
+`python -c <this file> METHOD PATH BODY [IDEMPOTENCY_KEY]`.
 
 The runner passes this file's source to `docker compose exec -T mock python -c`. The tokens
 stay in the container's environment: this prints only the status and the response body,
@@ -14,8 +15,10 @@ import urllib.request
 MOCK_URL = "http://127.0.0.1:8000"
 
 
-def request(method: str, path: str, body: str) -> dict[str, object]:
+def request(method: str, path: str, body: str, idempotency_key: str = "") -> dict[str, object]:
     headers = {"Authorization": "Bearer " + os.environ["MOCK_API_TOKEN"]}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     if path.startswith("/admin/"):
         headers["X-Admin-Token"] = os.environ["MOCK_ADMIN_TOKEN"]
     if body:
@@ -32,4 +35,4 @@ def request(method: str, path: str, body: str) -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    sys.stdout.write(json.dumps(request(*sys.argv[1:4])) + "\n")
+    sys.stdout.write(json.dumps(request(*sys.argv[1:5])) + "\n")
