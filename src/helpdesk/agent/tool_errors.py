@@ -20,7 +20,8 @@ ONE_CHANGE_AT_A_TIME_WHAT = "propose one change at a time, after your reads"
 # A write that may or may not have been saved (CONTRACTS §2.4).
 UNCONFIRMED_WRITE_NEXT_STEP = (
     "Tell the user the change could not be confirmed and may or may not have been saved; "
-    "do not make up a ticket id, and do not propose the change again unless the user asks"
+    "do not make up a ticket id, and do not propose the change again unless the user asks; "
+    "if they do, propose it with exactly the same arguments"
 )
 
 _INJECTED_NAMES: frozenset[str] = frozenset(

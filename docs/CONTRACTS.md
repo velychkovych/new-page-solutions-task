@@ -426,7 +426,8 @@ It is a custom LangGraph `StateGraph`, **not** `create_react_agent`.
 - `messages: Annotated[list[AnyMessage], add_messages]`
 - `user_id: str`
 - `pending_action: PendingAction | None` (`shared.approval.PendingAction`)
-- `last_write: WriteResult | None` (`shared.approval.WriteResult`)
+- `last_write: WriteResult | None` (`shared.approval.WriteResult`). It holds the write's
+  model-visible `args` too, so `propose` can recognise a retry of it.
 
 Every field is typed concretely, never `Any`, so the checkpointer can deserialise
 `PendingAction`/`WriteResult` under strict msgpack (see `docs/ai-log.md`, library notes).
@@ -455,10 +456,15 @@ Every field is typed concretely, never `Any`, so the checkpointer can deserialis
   - Validates the args against `CreateTicketArgs`/`AddCommentArgs`. Only model-visible args
     are kept. On invalid args, it returns an `INVALID_ARGUMENT` error `ToolMessage` and
     creates no pending action.
-  - Generates `action_id` and `idempotency_key` (both `uuid4`).
+  - Generates `action_id` (`uuid4`) and `idempotency_key`: a new `uuid4`, except when
+    `last_write` failed with an unknown outcome (`UPSTREAM_UNAVAILABLE`, `TIMEOUT` or
+    `INTERNAL`) and this proposal has the same tool and identical model-visible args. Then
+    it reuses that write's key: a write that was saved is replayed by the mock, not saved
+    twice, and one that was not saved runs once. Different args always get a new key (the
+    mock answers a reused key with a different body with 409).
   - Writes `pending_action`, with a deterministic human-readable `summary` and the model's
     `tool_call_id`.
-  - It is the **only** place an idempotency key is created.
+  - It is the **only** place an idempotency key is created or reused.
 - `approval` contains **only** `interrupt(pending_action)`. Resume re-runs the node, so it
   must have no side effects. The resume value is `{"action_id": str, "approve": bool}`.
 - `execute_write`:

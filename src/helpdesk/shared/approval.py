@@ -44,6 +44,9 @@ class WriteResult(BaseModel):
     action_id: str
     tool: ToolName
     idempotency_key: IdempotencyKey
+    # The model-visible args, so `propose` can tell a retry of this write from a new one.
+    # Defaulted: write results checkpointed before this field existed still load.
+    args: dict[str, JsonValue] = {}
     ok: bool
     result: JsonValue = None
     error_code: ErrorCode | None = None

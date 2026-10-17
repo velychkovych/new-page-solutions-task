@@ -4,6 +4,8 @@
   up, and nothing is written.
 - The write commits but its response is lost: the MCP server's retry (same idempotency
   key) gets the stored result as a replay, so the ticket is written exactly once.
+- The write commits, its response is lost and every retry fails: the user is told it could
+  not be confirmed, and when they ask again, the same proposal reuses the key and replays.
 """
 
 import re
@@ -33,6 +35,9 @@ FAIL_AFTER_COMMIT = {"enabled": True, "fail_after_commit_rate": 1.0, "seed": 7}
 # there). Seed 8 gives the write: commit with the response lost, then a 500, then a replay.
 # A retry with a fresh key would create a second ticket here.
 MIXED = {"enabled": True, "error_rate": 0.4, "fail_after_commit_rate": 0.6, "seed": 8}
+# Seed 1 gives the write: commit with the response lost, then a 503 and a 500 before the
+# handler, so the tool ends UPSTREAM_UNAVAILABLE although the ticket was saved.
+COMMIT_THEN_FAIL = {"enabled": True, "error_rate": 0.5, "fail_after_commit_rate": 1.0, "seed": 1}
 WRITE_FAILED = re.compile(r"^ERROR (UPSTREAM_UNAVAILABLE|TIMEOUT): ")
 TICKET_ID = re.compile(r"INC-\d{4}")
 
@@ -129,3 +134,31 @@ def test_a_lost_commit_then_an_error_then_a_replay_writes_exactly_once(
     assert_exactly_one_write(mock)
     ticket = created_ticket(mock)
     assert ticket["id"] in write.result_summary
+
+
+def test_retrying_an_unconfirmed_write_replays_it_instead_of_writing_twice(
+    agent: Agent, mock: Mock
+) -> None:
+    pending = agent.propose()
+    mock.chaos(**COMMIT_THEN_FAIL)
+
+    failed = agent.chat(action_id=pending.action_id)
+
+    (write,) = failed.tool_calls
+    assert write.error is not None
+    assert WRITE_FAILED.match(write.error), write.error
+    assert failed.reply == EMPTY_AFTER_FAILED_WRITE_REPLY
+    assert _tool_span(failed.trace_id)[attrs.TOOL_ATTEMPTS] == 3
+    mock.chaos_off()
+    # Saved, although the agent could not confirm it.
+    assert_exactly_one_write(mock)
+
+    # The script proposes the same ticket again, as a model asked to try again would.
+    retry = agent.propose()
+    approved = agent.chat(action_id=retry.action_id)
+
+    (write,) = approved.tool_calls
+    assert write.error is None, write.error
+    assert approved.reply == EMPTY_AFTER_WRITE_REPLY
+    assert_exactly_one_write(mock)
+    assert created_ticket(mock)["id"] in write.result_summary

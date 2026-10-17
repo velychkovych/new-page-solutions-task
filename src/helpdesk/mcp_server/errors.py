@@ -25,11 +25,13 @@ from helpdesk.shared.tickets import ApiError
 from helpdesk.shared.tools import INJECTED_ARGS, WRITE_TOOLS
 
 # The model must not claim either outcome, and must not make up a ticket id. It must not
-# propose the write again on its own either: a new proposal gets a new idempotency key, so
-# a write that did commit would be applied twice.
+# propose the write again on its own either. The agent reuses the idempotency key only for
+# a re-proposal with identical arguments; with any other arguments, a write that did
+# commit would be applied twice.
 WRITE_NOT_CONFIRMED_NEXT_STEP = (
     "Tell the user the change could not be confirmed and may or may not have been applied;"
-    " do not propose it again unless the user asks, and do not make up a ticket id"
+    " do not propose it again unless the user asks (then with exactly the same arguments),"
+    " and do not make up a ticket id"
 )
 WRITE_INTERNAL_NEXT_STEP = (
     "Tell the user the change could not be confirmed and to contact an administrator;"

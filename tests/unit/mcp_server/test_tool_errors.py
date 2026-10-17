@@ -74,11 +74,12 @@ READ_INTERNAL = (
     "Do not retry this call; tell the user the request failed because of an internal error"
     " and to contact an administrator."
 )
-# A new proposal gets a new idempotency key, so proposing an unconfirmed write again
-# could apply it twice.
+# The agent reuses the key only when the arguments are identical, so proposing an
+# unconfirmed write again with other arguments could apply it twice.
 WRITE_UNCONFIRMED = (
     "Tell the user the change could not be confirmed and may or may not have been applied;"
-    " do not propose it again unless the user asks, and do not make up a ticket id."
+    " do not propose it again unless the user asks (then with exactly the same arguments),"
+    " and do not make up a ticket id."
 )
 WRITE_INTERNAL = (
     "Tell the user the change could not be confirmed and to contact an administrator;"

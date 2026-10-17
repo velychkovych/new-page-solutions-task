@@ -264,7 +264,7 @@ class AgentNodes:
             raise GraphStateError("propose needs exactly one complete write tool call")
         call = message.tool_calls[0]
         try:
-            pending = build_pending_action(call)
+            pending = build_pending_action(call, state.get("last_write"))
         except InvalidProposalError as error:
             invalid = tool_message(
                 call_id=call["id"] or "", name=call["name"], text=error.tool_error, is_error=True
@@ -308,6 +308,7 @@ class AgentNodes:
             action_id=pending.action_id,
             tool=pending.tool,
             idempotency_key=pending.idempotency_key,
+            args=pending.args,
             ok=not result.is_error,
             result=None if result.is_error else _parse_result(result.text),
             error_code=error.code if error is not None else None,
