@@ -328,6 +328,12 @@ GET  /                 → web/index.html (Phase 2)
   present on every response, errors included.
 - `GET /sessions/...` returns the user, assistant and tool messages in order, never the
   system prompt. An unknown session returns 200 with `messages: []`.
+  - So that a reload shows what the user saw, the assistant message that proposed a write
+    has the same text as that turn's `reply` (it ends with the "I'd like to: <summary>…" ask),
+    and a decided write's tool message comes after a user message
+    `Approve: <summary>` or `Decline: <summary>`, whether the decision was a button or text.
+    The checkpoint stores neither as a message. The summary comes from the write's
+    ToolMessage, so writes decided before this rule show no decision line.
 
 ### 3.2 Approval in the next message
 

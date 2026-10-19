@@ -14,118 +14,341 @@
 <title>IT Helpdesk</title>
 <style>
   :root {
-    --fg: #1d1d1f; --muted: #5f6368; --bg: #ffffff; --panel: #f5f6f7; --line: #d6d8db;
-    --user: #e7f0fe; --error: #b3261e; --error-bg: #fdecea; --wait: #8a5a00; --wait-bg: #fff4d6;
-    --ok: #1e6b34;
+    color-scheme: light;
+    --bg: #f3f4f6; --surface: #ffffff; --surface-2: #f7f8fa; --line: #e4e6ea; --line-strong: #cdd1d7;
+    --fg: #16181d; --muted: #5f6570; --faint: #8b919c;
+    --accent: #2f5bd3; --accent-fg: #ffffff; --accent-soft: #e8eefc;
+    --ok: #1f7a3d; --approve: #1f7a3d; --error: #b3261e; --error-soft: #fdecea;
+    --wait: #855600; --wait-soft: #fff6dc; --wait-line: #efc456;
+    --shadow: 0 1px 2px rgb(16 24 40 / .05), 0 1px 3px rgb(16 24 40 / .07);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #0e1014; --surface: #171a20; --surface-2: #1d2129; --line: #2a2f38; --line-strong: #3b414c;
+      --fg: #e7e9ed; --muted: #a2a9b4; --faint: #7a818d;
+      --accent: #7f9dff; --accent-fg: #0e1014; --accent-soft: #1f2947;
+      --ok: #5cc184; --approve: #2e8b52; --error: #ff8a80; --error-soft: #3a1d1b;
+      --wait: #f2c55c; --wait-soft: #2f2610; --wait-line: #7d621f;
+      --shadow: none;
+    }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
-  header, #status-bar, main { padding: 8px 16px; }
-  header { border-bottom: 1px solid var(--line); }
-  h1 { font-size: 18px; margin: 0 0 6px; }
-  h2 { font-size: 15px; margin: 0 0 6px; }
-  h3 { font-size: 13px; margin: 0 0 4px; color: var(--muted); font-weight: 600; }
-  label { font-size: 13px; color: var(--muted); }
-  input, textarea, button { font: inherit; }
-  input { width: 18ch; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; }
-  input[aria-invalid="true"] { border-color: var(--error); }
-  button { padding: 4px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); cursor: pointer; }
-  button:disabled { opacity: .5; cursor: default; }
-  pre, code { font: 12px/1.4 ui-monospace, monospace; }
-  pre { margin: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel); padding: 4px 6px; border-radius: 4px; }
-  ol { list-style: none; margin: 0; padding: 0; }
-  #identity { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; }
-  #identity-error, .error-text { color: var(--error); }
-  #fixture-banner { margin: 6px 0 0; font-size: 13px; color: var(--wait); }
-  #status-bar { display: flex; flex-wrap: wrap; gap: 4px 16px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 13px; }
-  #status-line { margin: 0; flex: 1 1 24ch; }
-  #status-line[data-kind="error"] { color: var(--error); }
-  #status-line[data-kind="waiting"] { color: var(--wait); }
-  #trace { margin: 0; }
-  main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; }
-  @media (max-width: 800px) { main { grid-template-columns: minmax(0, 1fr); } }
-  #messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
-  .msg { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); }
-  .msg-user { background: var(--user); align-self: flex-end; max-width: 85%; }
-  .msg-assistant { background: var(--bg); }
-  .msg-tool { background: var(--panel); font-size: 13px; }
-  .msg.has-error { border-color: var(--error); background: var(--error-bg); }
-  .role { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; display: flex; flex-direction: column; min-height: 100vh;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg);
+  }
+  h1, h2, h3, p { margin: 0; }
+  a { color: var(--accent); }
+  code, pre { font-family: var(--mono); font-size: 12px; }
+  input, textarea, button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  button {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 14px;
+    border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--surface-2); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  button.approve { background: var(--approve); border-color: var(--approve); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled), button.approve:hover:not(:disabled) { filter: brightness(1.08); }
+  button.primary:hover:not(:disabled) { background: var(--accent); }
+  button.approve:hover:not(:disabled) { background: var(--approve); }
+  button svg { width: 16px; height: 16px; flex: none; }
+
+  /* --- top bar --- */
+  .topbar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 24px;
+    padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .logo {
+    display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px;
+    background: var(--accent); color: var(--accent-fg);
+  }
+  .logo svg { width: 20px; height: 20px; }
+  h1 { font-size: 16px; line-height: 1.2; }
+  .tagline { font-size: 12px; color: var(--muted); }
+  #fixture-banner {
+    font-size: 12px; color: var(--wait); background: var(--wait-soft);
+    border: 1px solid var(--wait-line); border-radius: 999px; padding: 2px 10px;
+  }
+  #identity { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+  .field {
+    display: flex; align-items: stretch; border: 1px solid var(--line-strong); border-radius: 8px;
+    background: var(--surface); overflow: hidden;
+  }
+  .field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .field:has(input[aria-invalid="true"]) { border-color: var(--error); }
+  .field span {
+    display: flex; align-items: center; padding: 0 9px; font-size: 12px; color: var(--muted);
+    background: var(--surface-2); border-right: 1px solid var(--line);
+  }
+  .field input { border: 0; padding: 5px 8px; font: 13px var(--mono); background: transparent; outline: none; }
+  .field input:disabled { color: var(--muted); }
+  #user-id { width: 13ch; }
+  #session-id { width: 27ch; }
+  #identity-error { flex-basis: 100%; text-align: right; font-size: 12px; color: var(--error); }
+  #identity-error:empty { display: none; }
+
+  /* --- layout --- */
+  main {
+    flex: 1; min-height: 0; display: grid; gap: 16px; padding: 16px 20px;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 400px);
+    width: 100%; max-width: 1440px; margin: 0 auto;
+  }
+  @media (min-width: 900px) {
+    body { height: 100vh; height: 100dvh; overflow: hidden; }
+  }
+  @media (max-width: 899px) {
+    .topbar { padding: 10px 12px; }
+    #identity { justify-content: flex-start; }
+    main { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+    #chat-panel { height: 82vh; height: 82dvh; }
+    #timeline-panel { max-height: 70vh; }
+  }
+  @media (max-width: 599px) {
+    .tagline { display: none; }
+    #identity { width: 100%; }
+    #identity-error { text-align: left; }
+    .field:has(#session-id) { flex: 1 1 0; min-width: 0; }
+    #user-id { width: 8ch; }
+    #session-id { width: 100%; min-width: 0; }
+    #new-session { padding: 6px 8px; }
+    #new-session .btn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    #pending { margin: 0 12px 10px; }
+    #chat-scroll { padding: 14px 12px; }
+    .chat-footer { padding: 8px 12px 10px; }
+  }
+  .card {
+    min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  }
+
+  /* --- chat --- */
+  #chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 20px; }
+  #welcome { max-width: 540px; margin: 6vh auto 0; text-align: center; }
+  #chat-scroll:has(#messages > li) #welcome { display: none; }
+  .welcome-icon {
+    display: inline-grid; place-items: center; width: 48px; height: 48px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+  }
+  .welcome-icon svg { width: 24px; height: 24px; }
+  #welcome h2 { font-size: 20px; margin: 12px 0 6px; }
+  #welcome p { color: var(--muted); font-size: 14px; }
+  .suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
+  .suggestions button { border-radius: 999px; font-size: 13px; background: var(--surface-2); }
+  .suggestions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+  #messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: min(85%, 720px); }
+  .msg-user {
+    align-self: flex-end; padding: 9px 14px; border-radius: 16px 16px 4px 16px;
+    background: var(--accent); color: var(--accent-fg);
+  }
+  .msg-user .role { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .msg-assistant, .msg-other {
+    align-self: flex-start; padding: 9px 14px; border-radius: 16px 16px 16px 4px;
+    background: var(--surface-2); border: 1px solid var(--line);
+  }
+  .msg.has-error { border-color: var(--error); background: var(--error-soft); }
+  .role { font-size: 11.5px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+  .msg-assistant .role { text-transform: capitalize; }
   .body { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .meta { font-size: 12px; color: var(--muted); }
+  .meta { margin-top: 6px; font-size: 11.5px; color: var(--faint); overflow-wrap: anywhere; }
   .meta:empty { display: none; }
-  #pending { border: 1px solid var(--wait); background: var(--wait-bg); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; }
-  #pending-summary { margin: 0 0 4px; overflow-wrap: anywhere; }
-  .actions { display: flex; gap: 8px; margin-top: 6px; }
-  #composer { display: grid; gap: 4px; }
-  #message { width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 4px; resize: vertical; }
-  .composer-row { display: flex; gap: 8px; align-items: center; }
-  .hint { font-size: 12px; color: var(--muted); }
-  #timeline { display: flex; flex-direction: column; gap: 10px; }
-  .turn { border-top: 1px solid var(--line); padding-top: 6px; }
-  .calls { display: flex; flex-direction: column; gap: 6px; }
-  .call { border-left: 3px solid var(--line); padding-left: 8px; }
-  .call.ok { border-left-color: var(--ok); }
-  .call.failed { border-left-color: var(--error); }
-  .call-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
-  .call-id, .latency, .label { font-size: 11px; color: var(--muted); }
+  .meta code { font-size: 11px; }
+  .error-text { color: var(--error); }
+  /* Only the reply being written gets the indicator; a finished empty reply says so in text. */
+  body[aria-busy="true"] .msg-assistant:last-child .body:empty::after {
+    content: "Thinking…"; color: var(--muted); font-style: italic; animation: pulse 1.4s ease-in-out infinite;
+  }
+
+  /* --- approval card --- */
+  #pending {
+    margin: 0 20px 12px; padding: 12px 14px; max-height: 42vh; overflow-y: auto;
+    border: 1px solid var(--wait-line); border-radius: 12px; background: var(--wait-soft);
+  }
+  .pending-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 6px; }
+  #pending h2 { font-size: 14px; color: var(--wait); }
+  #pending-tool { padding: 1px 6px; border-radius: 5px; background: var(--surface); border: 1px solid var(--line); }
+  #pending-summary { margin-bottom: 8px; overflow-wrap: anywhere; }
+  #pending-args .kv { padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+
+  .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0; font-size: 13px; }
+  .kv dt { font: 12px/1.6 var(--mono); color: var(--muted); }
+  .kv dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .kv-empty { font-size: 12px; color: var(--faint); }
+
+  /* --- composer and status --- */
+  .chat-footer { padding: 10px 20px 14px; border-top: 1px solid var(--line); }
+  #status-line { display: flex; align-items: center; gap: 7px; min-height: 1.5em; margin-bottom: 8px; font-size: 12.5px; color: var(--muted); }
+  #status-line::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  #status-line[data-kind="info"]::before { background: var(--ok); }
+  #status-line[data-kind="error"] { color: var(--error); }
+  #status-line[data-kind="error"]::before { background: var(--error); }
+  #status-line[data-kind="waiting"] { color: var(--wait); }
+  #status-line[data-kind="waiting"]::before { background: var(--wait); }
+  body[aria-busy="true"] #status-line::before {
+    width: 12px; height: 12px; background: none; border: 2px solid var(--line-strong);
+    border-top-color: var(--accent); animation: spin .8s linear infinite;
+  }
+  .composer-box {
+    display: flex; align-items: flex-end; gap: 8px; padding: 6px 6px 6px 12px;
+    border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface);
+  }
+  .composer-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  #message {
+    flex: 1; min-width: 0; padding: 6px 0; border: 0; outline: none; resize: none;
+    background: transparent; max-height: 220px;
+  }
+  @supports (field-sizing: content) {
+    #message { field-sizing: content; min-height: calc(1.5em + 12px); }
+  }
+  .hint { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  kbd {
+    font: 11px var(--mono); padding: 0 4px; border: 1px solid var(--line-strong); border-bottom-width: 2px;
+    border-radius: 4px; background: var(--surface-2);
+  }
+
+  /* --- tool calls --- */
+  .panel-head { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
+  .panel-head h2 { font-size: 14px; }
+  #trace { display: flex; align-items: baseline; gap: 4px; min-width: 0; margin-top: 2px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #trace-id { display: flex; gap: 6px; min-width: 0; }
+  #trace-id code, .turn h3 code, .meta code { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  #timeline-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px 16px; }
+  #timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 18px; }
+  .turn h3 {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; margin-bottom: 8px;
+    font-size: 12px; font-weight: 600; color: var(--muted);
+  }
+  .turn h3 code { max-width: 14ch; font-weight: 400; }
+  .calls { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .call { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+  .call.failed { border-color: var(--error); background: var(--error-soft); }
+  .call-head { display: flex; align-items: center; gap: 8px; }
+  .call-head strong { font: 600 13px var(--mono); overflow-wrap: anywhere; }
+  .latency { margin-left: auto; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .status-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .call.ok .status-dot { background: var(--ok); }
+  .call.failed .status-dot { background: var(--error); }
+  .call.running .status-dot {
+    width: 10px; height: 10px; background: none; border: 2px solid var(--line-strong);
+    border-top-color: var(--accent); animation: spin .8s linear infinite;
+  }
+  .call .kv, .call .args { margin-top: 6px; }
+  .call .args { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .result { margin-top: 6px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .result::before { content: "→ "; color: var(--faint); }
+  .result:empty { display: none; }
+  .call pre.error-text { margin: 6px 0 0; font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
   .note { font-size: 12px; color: var(--wait); font-style: italic; }
-  .empty { font-size: 13px; color: var(--muted); }
+  .empty { padding: 28px 8px; text-align: center; font-size: 13px; color: var(--muted); }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 50% { opacity: .4; } }
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after { animation: none !important; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>IT Helpdesk</h1>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14v-2a9 9 0 0 1 18 0v2"/><path d="M21 15a2 2 0 0 1-2 2h-1v-6h1a2 2 0 0 1 2 2z"/><path d="M3 15a2 2 0 0 0 2 2h1v-6H5a2 2 0 0 0-2 2z"/><path d="M18 17v1a3 3 0 0 1-3 3h-3"/></svg>
+    </span>
+    <div>
+      <h1>IT Helpdesk</h1>
+      <p class="tagline">Nothing changes until you approve it</p>
+    </div>
+    <p id="fixture-banner" hidden></p>
+  </div>
   <form id="identity" novalidate>
-    <label>User id<br>
+    <label class="field"><span>User</span>
       <input id="user-id" name="user_id" autocomplete="off" spellcheck="false" required
              maxlength="64" pattern="[a-zA-Z0-9_\-]{1,64}" placeholder="alice">
     </label>
-    <label>Session id<br>
+    <label class="field"><span>Session</span>
       <input id="session-id" name="session_id" autocomplete="off" spellcheck="false" required
              maxlength="64" pattern="[a-zA-Z0-9_\-]{1,64}">
     </label>
-    <button id="new-session" type="button">New session</button>
+    <button id="new-session" type="button" title="Start a new conversation">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span class="btn-label">New session</span>
+    </button>
     <span id="identity-error" aria-live="polite"></span>
   </form>
-  <p id="fixture-banner" hidden></p>
 </header>
 
-<div id="status-bar">
-  <p id="status-line" role="status" aria-live="polite">Loading…</p>
-  <p id="trace">Last trace: <span id="trace-id">none yet</span></p>
-</div>
-
 <main>
-  <section id="chat-panel" aria-label="Chat">
-    <ol id="messages" aria-label="Conversation"></ol>
+  <section id="chat-panel" class="card" aria-label="Chat">
+    <div id="chat-scroll">
+      <div id="welcome">
+        <span class="welcome-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </span>
+        <h2>What can we help with?</h2>
+        <p>Describe the problem. The assistant checks existing tickets first, then proposes a
+          new ticket or a comment for you to approve.</p>
+        <div class="suggestions" aria-label="Example requests">
+          <button type="button" data-prompt="My VPN keeps dropping every few minutes">VPN keeps dropping</button>
+          <button type="button" data-prompt="Outlook crashes as soon as I open it">Outlook crashes on startup</button>
+          <button type="button" data-prompt="The printer on floor 2 keeps jamming">Printer on floor 2 jams</button>
+          <button type="button" data-prompt="Which of my tickets are still open?">My open tickets</button>
+        </div>
+      </div>
+      <ol id="messages" aria-label="Conversation"></ol>
+    </div>
 
     <div id="pending" hidden>
-      <h2>Awaiting your approval</h2>
+      <div class="pending-head">
+        <h2>Awaiting your approval</h2>
+        <code id="pending-tool"></code>
+      </div>
       <p id="pending-summary"></p>
-      <div class="label">Tool <code id="pending-tool"></code></div>
-      <pre id="pending-args"></pre>
+      <div id="pending-args"></div>
       <div class="actions">
-        <button id="approve" type="button" disabled>Approve</button>
+        <button id="approve" class="approve" type="button" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+          Approve
+        </button>
         <button id="decline" type="button" disabled>Decline</button>
+        <span class="hint">or reply "approve" / "decline"</span>
       </div>
     </div>
 
-    <form id="composer" novalidate>
-      <label for="message">Message</label>
-      <textarea id="message" name="message" rows="3" maxlength="4000"
-                placeholder="Describe your IT problem…"></textarea>
-      <div class="composer-row">
-        <button id="send" type="submit">Send</button>
-        <span class="hint">Ctrl/Cmd+Enter sends. While a change is pending you can also type
-          "approve" or "decline".</span>
-      </div>
-    </form>
+    <div class="chat-footer">
+      <p id="status-line" role="status" aria-live="polite">Loading…</p>
+      <form id="composer" novalidate>
+        <label for="message" class="sr-only">Message</label>
+        <div class="composer-box">
+          <textarea id="message" name="message" rows="2" maxlength="4000"
+                    placeholder="Describe your IT problem…"></textarea>
+          <button id="send" class="primary" type="submit">
+            Send
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </div>
+        <p class="hint"><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a new line</p>
+      </form>
+    </div>
   </section>
 
-  <section id="timeline-panel" aria-label="Tool calls">
-    <h2>Tool calls</h2>
-    <ol id="timeline"></ol>
+  <section id="timeline-panel" class="card" aria-label="Tool calls">
+    <div class="panel-head">
+      <h2>Tool calls</h2>
+      <p id="trace">Last trace: <span id="trace-id">none yet</span></p>
+    </div>
+    <div id="timeline-scroll">
+      <ol id="timeline"><li class="empty">Tool calls appear here as the assistant works.</li></ol>
+    </div>
   </section>
 </main>
 
@@ -198,6 +421,8 @@ function createSseParser(onEvent) {
   // Fixture names map to files under fixtures/; the pattern rules out path tricks.
   const FIXTURE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
   const MESSAGE_MAX = 4000;
+  // The approval card shows the summary; repeating it here would only add noise.
+  const AWAITING = "Waiting for your decision on the proposed change.";
   const STORAGE_KEY = "helpdesk.identity";
   const FIXTURE_CHUNK_SIZES = [1, 7, 2, 13, 3, 31, 5, 64];
   const FIXTURE_CHUNK_DELAY_MS = 8;
@@ -207,10 +432,12 @@ function createSseParser(onEvent) {
     identity: $("identity"), userId: $("user-id"), sessionId: $("session-id"),
     newSession: $("new-session"), identityError: $("identity-error"),
     fixtureBanner: $("fixture-banner"), status: $("status-line"), traceId: $("trace-id"),
+    chatScroll: $("chat-scroll"), welcome: $("welcome"),
     messages: $("messages"), pending: $("pending"), pendingSummary: $("pending-summary"),
     pendingTool: $("pending-tool"), pendingArgs: $("pending-args"),
     approve: $("approve"), decline: $("decline"),
-    composer: $("composer"), message: $("message"), send: $("send"), timeline: $("timeline"),
+    composer: $("composer"), message: $("message"), send: $("send"),
+    timelineScroll: $("timeline-scroll"), timeline: $("timeline"),
   };
 
   const params = new URLSearchParams(location.search);
@@ -277,8 +504,27 @@ function createSseParser(onEvent) {
     ui.status.dataset.kind = kind;
   }
 
-  function scrollToEnd() {
-    ui.messages.lastElementChild?.scrollIntoView({ block: "nearest" });
+  // Scrolls only the panel itself: scrollIntoView would also scroll the page on narrow
+  // screens, where the panels are stacked.
+  function scrollToEnd(box = ui.chatScroll) {
+    box.scrollTop = box.scrollHeight;
+  }
+
+  // Arguments as a key/value list, which reads better than JSON for the flat objects the
+  // tools take. Anything else falls back to JSON.
+  function fieldList(value, { skipNull = false } = {}) {
+    if (value === undefined) return null;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return el("pre", { class: "args" }, pretty(value));
+    }
+    const list = el("dl", { class: "kv" });
+    let count = 0;
+    for (const [key, item] of Object.entries(value)) {
+      if (skipNull && (item === null || item === undefined)) continue;
+      list.append(el("dt", {}, key), el("dd", {}, typeof item === "string" ? item : JSON.stringify(item)));
+      count += 1;
+    }
+    return count ? list : el("div", { class: "kv-empty" }, "no arguments");
   }
 
   // --- identity ----------------------------------------------------------------
@@ -351,38 +597,39 @@ function createSseParser(onEvent) {
     ui.pending.hidden = pendingAction === null;
     ui.pendingSummary.textContent = pendingAction ? text(pendingAction.summary) : "";
     ui.pendingTool.textContent = pendingAction ? text(pendingAction.tool) : "";
-    ui.pendingArgs.textContent = pendingAction ? pretty(pendingAction.args) : "";
+    ui.pendingArgs.replaceChildren(...(pendingAction ? [fieldList(pendingAction.args) ?? ""] : []));
     syncControls();
   }
 
   // --- rendering -----------------------------------------------------------------
 
-  const ROLES = new Set(["user", "assistant", "tool"]);
+  // Tool messages are not chat: live and reloaded alike, they go to the tool-call panel.
+  const ROLES = new Set(["user", "assistant"]);
+  const STORED_RESULT_MAX = 200;
 
-  function appendMessage(role, content, toolName) {
+  function appendMessage(role, content) {
     const safeRole = ROLES.has(role) ? role : "other";
     const body = el("div", { class: "body" }, content);
     const meta = el("div", { class: "meta" });
-    let shown = body;
-    if (safeRole === "tool") {
-      const preview = content.length > 120 ? content.slice(0, 120) + "…" : content;
-      shown = el("details", {}, el("summary", {}, preview), body);
-    }
-    const label = safeRole === "tool" && toolName ? `tool: ${toolName}` : safeRole;
-    const item = el("li", { class: `msg msg-${safeRole}` }, el("div", { class: "role" }, label), shown, meta);
+    const item = el("li", { class: `msg msg-${safeRole}` }, el("div", { class: "role" }, safeRole), body, meta);
     ui.messages.append(item);
     scrollToEnd();
     return { item, body, meta };
   }
 
-  function startTurn(userLabel, identity) {
+  function addTimelineTurn() {
     turnCount += 1;
-    if (userLabel) appendMessage("user", userLabel);
-    const bubble = appendMessage("assistant", "");
     const header = el("h3", {}, `Turn ${turnCount}`);
     const calls = el("ol", { class: "calls" });
     ui.timeline.querySelector(".empty")?.remove();
     ui.timeline.append(el("li", { class: "turn" }, header, calls));
+    return { header, calls };
+  }
+
+  function startTurn(userLabel, identity) {
+    if (userLabel) appendMessage("user", userLabel);
+    const bubble = appendMessage("assistant", "");
+    const { header, calls } = addTimelineTurn();
     return {
       bubble, header, calls, rows: new Map(), reply: "", pending: null, error: null,
       done: false, needsReload: false, key: identityKey(identity),
@@ -418,14 +665,16 @@ function createSseParser(onEvent) {
 
   function addToolRow(turn, callId, name, args) {
     const latency = el("span", { class: "latency" }, "running…");
-    const result = el("pre", { class: "result" }, "");
+    const result = el("p", { class: "result" });
     const error = el("pre", { class: "error-text" });
     error.hidden = true;
     const row = el("li", { class: "call running" },
-      el("div", { class: "call-head" }, el("strong", {}, name), el("code", { class: "call-id" }, callId), latency),
-      el("div", { class: "label" }, "args"), el("pre", { class: "args" }, pretty(args)),
-      el("div", { class: "label" }, "result"), result, error);
+      el("div", { class: "call-head" },
+        el("span", { class: "status-dot", "aria-hidden": "true" }),
+        el("strong", { title: `call ${callId}` }, name), latency),
+      fieldList(args, { skipNull: true }), result, error);
     turn.calls.append(row);
+    scrollToEnd(ui.timelineScroll);
     const entry = { row, latency, result, error };
     turn.rows.set(callId, entry);
     return entry;
@@ -439,7 +688,7 @@ function createSseParser(onEvent) {
     const summary = text(data.result_summary);
     // A failed call's summary is usually the start of the error text; show it once.
     const repeatsError = failed && summary !== "" && data.error.startsWith(summary);
-    entry.result.textContent = repeatsError ? "(failed, see error)" : summary || "(no result)";
+    entry.result.textContent = repeatsError ? "" : summary || "(no result)";
     if (failed) {
       entry.error.textContent = data.error;
       entry.error.hidden = false;
@@ -447,7 +696,7 @@ function createSseParser(onEvent) {
   }
 
   function traceNodes(traceId) {
-    const nodes = [el("code", {}, traceId)];
+    const nodes = [el("code", { title: traceId }, traceId)];
     if (jaegerBase) {
       nodes.push(" ", el("a", {
         href: new URL(`trace/${traceId}`, jaegerBase).href, target: "_blank", rel: "noopener noreferrer",
@@ -458,7 +707,7 @@ function createSseParser(onEvent) {
 
   function showTrace(turn, traceId) {
     if (!TRACE_RE.test(traceId)) return;
-    turn.bubble.meta.prepend(el("div", { class: "trace" }, "trace ", ...traceNodes(traceId)));
+    turn.bubble.meta.append(el("div", { class: "trace" }, "trace ", ...traceNodes(traceId)));
     turn.header.append(" · ", ...traceNodes(traceId));
     ui.traceId.replaceChildren(...traceNodes(traceId));
   }
@@ -470,7 +719,7 @@ function createSseParser(onEvent) {
     if (status === "awaiting_approval") {
       if (pending) {
         setPending(pending, turn.key);
-        setStatus(`Awaiting approval: ${text(pending.summary)}`, "waiting");
+        setStatus(AWAITING, "waiting");
       } else {
         // Contract breach (no approval_required); the session view is authoritative.
         turn.needsReload = true;
@@ -488,21 +737,40 @@ function createSseParser(onEvent) {
 
   function clearView() {
     ui.messages.replaceChildren();
-    ui.timeline.replaceChildren(el("li", { class: "empty" }, "Tool calls of new turns appear here."));
+    ui.timeline.replaceChildren(el("li", { class: "empty" }, "Tool calls appear here as the assistant works."));
     turnCount = 0;
     setPending(null);
+  }
+
+  // The session view has no status, arguments or latency for a call, so the row shows
+  // only the tool and its result, and no ok/failed dot.
+  function addStoredCall(calls, name, content) {
+    const result = content.length > STORED_RESULT_MAX ? content.slice(0, STORED_RESULT_MAX - 1) + "…" : content;
+    calls.append(el("li", { class: "call" },
+      el("div", { class: "call-head" },
+        el("span", { class: "status-dot", "aria-hidden": "true" }), el("strong", {}, name)),
+      el("p", { class: "result" }, result || "(no result)")));
   }
 
   function renderSession(view, identity) {
     clearView();
     const messages = Array.isArray(view.messages) ? view.messages : [];
+    // One panel group per user message, like the live view's one group per request.
+    let group = null;
     for (const message of messages) {
+      const role = text(message && message.role);
       const content = text(message && message.content);
-      if (message && message.role === "assistant" && content === "") continue;
-      appendMessage(text(message && message.role), content, text(message && message.tool_name));
+      if (role === "tool") {
+        group ??= addTimelineTurn();
+        addStoredCall(group.calls, text(message.tool_name) || "(unknown tool)", content);
+        continue;
+      }
+      if (role === "assistant" && content === "") continue;
+      if (role === "user") group = null;
+      appendMessage(role, content);
     }
     setPending(view.pending_action || null, identityKey(identity));
-    if (pendingAction) setStatus(`Awaiting approval: ${text(pendingAction.summary)}`, "waiting");
+    if (pendingAction) setStatus(AWAITING, "waiting");
     else setStatus(messages.length ? `Session loaded (${messages.length} messages).` : "New session.");
   }
 
@@ -774,14 +1042,24 @@ function createSseParser(onEvent) {
     if (message.length > MESSAGE_MAX) { setStatus(`Messages are limited to ${MESSAGE_MAX} characters.`, "error"); return; }
     if (busy) return;
     ui.message.value = "";
+    // Clicking Send moves focus to the button, which is then disabled; keep typing possible.
+    ui.message.focus();
     runTurn({ message }, message);
   });
 
   ui.message.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-      event.preventDefault();
-      ui.composer.requestSubmit();
-    }
+    // Shift+Enter adds a line; during IME composition Enter only confirms the text.
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    ui.composer.requestSubmit();
+  });
+
+  // Example requests fill the box rather than send, so they can be edited first.
+  ui.welcome.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-prompt]");
+    if (!button) return;
+    ui.message.value = button.getAttribute("data-prompt");
+    ui.message.focus();
   });
 
   function decide(approve) {

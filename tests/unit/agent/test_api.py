@@ -386,6 +386,50 @@ async def test_session_view_excludes_the_system_prompt(make_client, provider, fa
     assert view.pending_action == proposal.pending_action
 
 
+async def test_session_view_shows_the_pending_proposal_as_the_reply_did(
+    make_client, provider, fake_model, make_ai
+):
+    client, _, proposal = await _propose(make_client, provider, fake_model, make_ai)
+
+    view = SessionView.model_validate((await client.get("/sessions/alice/s1")).json())
+
+    assert view.messages[-1].content == proposal.reply
+
+
+@pytest.mark.parametrize(
+    ("approve", "label", "tool_content"),
+    [
+        pytest.param(True, "Approve", '{"id": "INC-0016"}', id="approve"),
+        pytest.param(False, "Decline", "User declined.", id="decline"),
+    ],
+)
+async def test_session_view_keeps_the_proposal_and_the_decision(
+    *, make_client, provider, fake_model, make_ai, approve, label, tool_content
+):
+    provider.replies["create_ticket"] = [ToolResult(text='{"id": "INC-0016"}', is_error=False)]
+    client, _, proposal = await _propose(
+        make_client, provider, fake_model, make_ai, make_ai("All done.")
+    )
+    action = proposal.pending_action
+
+    await _chat(client, decision={"action_id": action.action_id, "approve": approve})
+    view = SessionView.model_validate((await client.get("/sessions/alice/s1")).json())
+
+    assert [(m.role, m.tool_name) for m in view.messages] == [
+        ("user", None),
+        ("tool", "search_tickets"),
+        ("assistant", None),
+        ("user", None),
+        ("tool", "create_ticket"),
+        ("assistant", None),
+    ]
+    assert view.messages[2].content == proposal.reply
+    assert view.messages[3].content == f"{label}: {action.summary}"
+    assert view.messages[4].content.startswith(tool_content)
+    assert view.messages[5].content == "All done."
+    assert view.pending_action is None
+
+
 async def test_unknown_session_returns_no_messages(make_client, provider, fake_model):
     client = await make_client(fake_model(responses=[]), provider)
     response = await client.get("/sessions/nobody/new-session")

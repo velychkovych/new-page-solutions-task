@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from pydantic import JsonValue
 
 from helpdesk.agent.model_calls import ModelCall, model_calls
-from helpdesk.agent.tool_messages import is_declined, latency_of
+from helpdesk.agent.tool_messages import is_declined, latency_of, proposal_of
 from helpdesk.shared.api import (
     MessageRole,
     PendingActionView,
@@ -110,18 +110,66 @@ def last_ai_text(messages: Sequence[BaseMessage]) -> str:
     return message_text(message).strip() if message is not None else ""
 
 
-def session_messages(messages: Sequence[BaseMessage]) -> list[SessionMessage]:
-    """User, assistant and tool messages in order; never the system prompt."""
+def proposal_reply(ai_text: str, summary: str) -> str:
+    ask = f'I\'d like to: {summary}. Reply "yes" to approve or "no" to decline.'
+    return f"{ai_text}\n\n{ask}" if ai_text else ask
+
+
+def decision_text(summary: str, *, approve: bool) -> str:
+    # The same words the page shows for an Approve or Decline click.
+    return f"{'Approve' if approve else 'Decline'}: {summary}"
+
+
+def _proposed_in(
+    messages: Sequence[BaseMessage], index: int, pending: PendingAction | None
+) -> str | None:
+    """The summary the user was asked about after the AI message at `index`, if any.
+
+    Its tool results follow it directly; the write the user decided on carries the
+    summary. A write still waiting for the decision has no result yet.
+    """
+    message = messages[index]
+    if not isinstance(message, AIMessage):
+        return None
+    call_ids = {call.id for call in model_calls(message)}
+    for later in messages[index + 1 :]:
+        if not isinstance(later, ToolMessage):
+            break
+        summary = proposal_of(later)
+        if summary is not None and later.tool_call_id in call_ids:
+            return summary
+    if pending is not None and pending.tool_call_id in call_ids and message is messages[-1]:
+        return pending.summary
+    return None
+
+
+def session_messages(
+    messages: Sequence[BaseMessage], pending: PendingAction | None = None
+) -> list[SessionMessage]:
+    """User, assistant and tool messages in order; never the system prompt.
+
+    The approval request and the user's decision are not messages in the checkpoint
+    (the API adds the one to the reply and resumes the graph with the other), so they
+    are rebuilt here from the proposal the write's result carries, as the user saw them.
+    """
     view: list[SessionMessage] = []
-    for message in messages:
+    for index, message in enumerate(messages):
         match message:
             case HumanMessage():
                 view.append(SessionMessage(role=MessageRole.USER, content=message_text(message)))
             case AIMessage():
-                text = message_text(message)
-                if text.strip():
+                text = message_text(message).strip()
+                proposed = _proposed_in(messages, index, pending)
+                if proposed is not None:
+                    text = proposal_reply(text, proposed)
+                if text:
                     view.append(SessionMessage(role=MessageRole.ASSISTANT, content=text))
             case ToolMessage():
+                summary = proposal_of(message)
+                if summary is not None:
+                    approved = not is_declined(message)
+                    content = decision_text(summary, approve=approved)
+                    view.append(SessionMessage(role=MessageRole.USER, content=content))
                 view.append(
                     SessionMessage(
                         role=MessageRole.TOOL,

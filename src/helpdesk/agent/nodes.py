@@ -320,6 +320,7 @@ class AgentNodes:
             text=result.text,
             is_error=result.is_error,
             latency_ms=latency,
+            proposal=pending.summary,
         )
         return {"pending_action": None, "last_write": last_write, "messages": [reply]}
 
@@ -327,5 +328,7 @@ class AgentNodes:
         pending = state.get("pending_action")
         if pending is None:
             raise GraphStateError("record_decline ran without a pending action")
-        declined = declined_message(call_id=pending.tool_call_id, name=pending.tool.value)
+        declined = declined_message(
+            call_id=pending.tool_call_id, name=pending.tool.value, proposal=pending.summary
+        )
         return {"pending_action": None, "messages": [declined]}

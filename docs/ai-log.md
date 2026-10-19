@@ -1163,3 +1163,66 @@ No live eval was run and no paid model API was called.
 - No effort is set, so the agent now runs at Haiku 5.5's default effort `medium` (Sonnet
   5.5's default is `high`).
 - No live eval has been run on Haiku as the agent yet. The committed results are Sonnet's.
+
+## 2026-10-19 — Track D: web page redesign
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- At the author's request, restyled `web/index.html` and improved how it is used: full-height
+  layout with a scrolling chat and tool-call panel, compact identity bar, a welcome state with
+  example requests (they fill the box and do not send), chat bubbles, an approval card with the
+  arguments as a key/value list, a status line with a busy spinner, tool-call cards with a
+  status dot and latency, dark mode, reduced motion, and a phone layout.
+- Enter now sends and Shift+Enter adds a line (was Ctrl/Cmd+Enter). The waiting status no
+  longer repeats the summary shown on the approval card.
+- Unchanged: SSE parser, network, fallback, decision and identity logic, CSP, element ids.
+
+### Verified, and how
+
+- Headless Chrome screenshots of the fixture replays (`propose`, `error`,
+  `session-pending`) at 1440 px in light and dark, and at 375 px in an iframe.
+- `make lint` `All checks passed!`; `make typecheck` `Success: no issues found in 97 source
+  files`; `make test` `1350 passed, 11 warnings in 120.58s`.
+
+### Unsure — author should review
+
+- The welcome state's example requests are new UI copy and not in PLAN.md §8.
+- Not checked in Firefox, which does not support `field-sizing`, so the message box there
+  stays two rows tall instead of growing.
+
+## 2026-10-19 — Tracks C and D: a reload shows the conversation as it was seen
+
+### Delegated to AI (Claude Code, Opus 5.5)
+
+- The author reported that after Approve and a page reload the chat lost the "I'd like to: …"
+  ask and the "Approve: …" line, and showed tool messages inline. Cause: the ask is added to
+  the reply by the service and the decision resumes the graph, so neither is a checkpoint
+  message, and `renderSession` put tool messages in the chat.
+- With the author's approval (agent code and CONTRACTS §3.1): `execute_write` and
+  `record_decline` put the pending summary on their ToolMessage (`PROPOSAL_KEY`);
+  `session_messages` rebuilds the ask on the proposing assistant message and inserts a user
+  `Approve: <summary>` / `Decline: <summary>` before the write's tool message; a still-pending
+  proposal gets the ask from the pending action. `proposal_reply` moved from `service.py` to
+  `transcript.py` so both use one text.
+- `web/index.html`: stored tool messages go to the tool-call panel, one group per user
+  message, showing tool name and result only (the view has no status, args or latency).
+
+### Verified, and how
+
+- New API tests (pending view equals the proposal reply; approve and decline views) fail on
+  the old code and pass on the new. New page test for grouping by user message.
+- Live: rebuilt the agent container, ran a proposal and Approve in headless Chrome, reloaded,
+  and compared the chat before and after: same four bubbles.
+- `make lint` `All checks passed!`; `make typecheck` `Success: no issues found in 97 source
+  files`; `make test` `1354 passed, 11 warnings in 141.80s`.
+
+### Unsure — author should review
+
+- Sessions decided before this change have no summary on the ToolMessage, so they still show
+  no decision line.
+- A typed "yes" shows as "Approve: <summary>" after a reload, not as "yes".
+- Still not stored, so still missing after a reload: re-ask and stale-decision replies (and
+  the text that triggered them), and trace links.
+- The page reload seen in the author's browser ~2 s after Approve was not reproduced in a
+  clean Chrome profile; that browser requests `/sw.js`, so a service worker left over from
+  another app on `localhost:8080` is the likely trigger.

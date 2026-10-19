@@ -377,17 +377,40 @@ def test_trace_link_ignores_a_jaeger_query_parameter() -> None:
 def test_session_view_rebuilds_messages_and_buttons() -> None:
     report = run_page(scenario([{"op": "snapshot"}], {}, session={"json": SESSION_PENDING}))
     [snap] = report["snapshots"]
-    assert [m["class"] for m in snap["messages"]] == [
-        "msg msg-user",
-        "msg msg-tool",
-        "msg msg-tool",
-        "msg msg-assistant",
-    ]
+    # Tool messages go to the tool-call panel, as they do during a live turn.
+    assert [m["class"] for m in snap["messages"]] == ["msg msg-user", "msg msg-assistant"]
+    assert "search_tickets" in snap["timeline"]
+    assert "get_ticket" in snap["timeline"]
     # Untrusted text is shown as text.
-    assert "<img src=x onerror=alert(1)>" in snap["messages"][1]["text"]
+    assert "<img src=x onerror=alert(1)>" in snap["timeline"]
     assert not snap["pendingHidden"]
     assert not snap["disabled"]["approve"]
     assert not snap["disabled"]["decline"]
+
+
+def test_session_view_groups_tool_calls_by_user_message() -> None:
+    def msg(role: str, content: str, tool_name: str | None = None) -> dict[str, Any]:
+        return {"role": role, "content": content, "tool_name": tool_name}
+
+    approved = {
+        "messages": [
+            msg("user", "VPN keeps dropping"),
+            msg("tool", "INC-0003 VPN keeps dropping (open)", "search_tickets"),
+            msg("assistant", 'I\'d like to: Add a comment to INC-0003: "Dropped again".'),
+            msg("user", 'Approve: Add a comment to INC-0003: "Dropped again"'),
+            msg("tool", '{"ticket_id":"INC-0003"}', "add_comment"),
+            msg("assistant", "I added the comment."),
+        ]
+    }
+    report = run_page(scenario([{"op": "snapshot"}], {}, session={"json": approved}))
+    [snap] = report["snapshots"]
+    assert [m["class"] for m in snap["messages"]] == ["msg msg-user", "msg msg-assistant"] * 2
+    approve = snap["messages"][2]["text"]
+    assert approve.endswith('Approve: Add a comment to INC-0003: "Dropped again"')
+    turn_1, turn_2 = snap["timeline"].split("Turn 2")
+    assert "search_tickets" in turn_1
+    assert "add_comment" not in turn_1
+    assert "add_comment" in turn_2
 
 
 @pytest.mark.parametrize(

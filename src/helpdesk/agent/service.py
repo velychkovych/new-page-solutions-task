@@ -31,6 +31,7 @@ from helpdesk.agent.transcript import (
     last_ai_message,
     last_ai_text,
     pending_view,
+    proposal_reply,
     session_messages,
     tool_call_records,
 )
@@ -63,11 +64,6 @@ def reask_reply(pending: PendingAction) -> str:
 
 def cut_off_proposal_reply(pending: PendingAction) -> str:
     return f"My last reply was cut off before I could ask you about this. {reask_reply(pending)}"
-
-
-def proposal_reply(ai_text: str, pending: PendingAction) -> str:
-    ask = f'I\'d like to: {pending.summary}. Reply "yes" to approve or "no" to decline.'
-    return f"{ai_text}\n\n{ask}" if ai_text else ask
 
 
 class ShuttingDownError(Exception):
@@ -428,7 +424,9 @@ class ChatService:
         pending = awaiting_approval(snapshot)
         if pending is not None:
             text = last_ai_text(messages)
-            return TurnOutcome(proposal_reply(text, pending), ChatStatus.AWAITING_APPROVAL, pending)
+            return TurnOutcome(
+                proposal_reply(text, pending.summary), ChatStatus.AWAITING_APPROVAL, pending
+            )
         reply = final_reply(last_ai_message(messages), turn_write(start, snapshot))
         return TurnOutcome(reply, ChatStatus.OK)
 
@@ -436,6 +434,6 @@ class ChatService:
         snapshot = await self._graph.aget_state(self._config(user_id, session_id))
         pending = awaiting_approval(snapshot)
         return SessionView(
-            messages=session_messages(_messages(snapshot)),
+            messages=session_messages(_messages(snapshot), pending),
             pending_action=pending_view(pending) if pending is not None else None,
         )
